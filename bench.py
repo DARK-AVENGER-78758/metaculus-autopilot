@@ -3,6 +3,7 @@
     uv run python bench.py probe             call every model in the pool once and report what works
     uv run python bench.py run --count 12    sit the next 12 exam questions (resumes where it stopped)
     uv run python bench.py report            score everything sat so far
+    uv run python bench.py tune              choose an answering rule on half the results, test it on the rest
     Add --set all to use every question set, or --set 2026-09-27 for one.
 
 The exam is ForecastBench (github.com/forecastingresearch/forecastbench-datasets, CC BY-SA):
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -235,7 +237,7 @@ async def _sit_set(todo: list[dict], label: str, set_date: str) -> None:
                 "id": row["id"], "set": set_date, "source": row["source"], "question": row["question"],
                 "outcome": row["outcome"], "crowd": row["crowd"], "forecast": report.prediction,
                 "evidence": len(state["evidence"]), "seconds": round(time.monotonic() - started),
-                "models": models.FORECAST_MODELS,
+                "models": models.FORECAST_MODELS, "samples": bot.samples.get(question.id_of_question),
             }
             with open(BENCH / f"results-{label}.jsonl", "a", encoding="utf-8") as out:
                 out.write(json.dumps(line) + "\n")
@@ -329,9 +331,123 @@ def report_text(label: str, sets: list[str] | None = None) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- tuning
+
+BELOW, ABOVE = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3), (0.7, 0.75, 0.8, 0.85, 0.9, 0.95)  # cut-offs a rule may use
+SMALLEST_GROUP = 10  # a kind of question is left out only on the evidence of at least this many answers
+# ponytail: a keyword guess at the topic, first match wins. Label with a model if the kinds start to matter.
+KINDS = {
+    "price": r"\b(btc|eth|bitcoin|ethereum|solana|xrp|crypto\w*|oil|brent|wti|gold|silver|nasdaq|s&p|stocks?|shares?|"
+    r"close price|settle|trimmed mean|dip to|market cap)\b",
+    "screen": r"\b(rotten tomatoes|box office|oscars?|emmys?|grammys?|billboard|spotify|netflix|album|movie|film|youtube)\b",
+    "sport": r"\b(nba|nfl|mlb|nhl|ufc|fifa|uefa|nascar|f1|grand prix|champion\w*|world cup|super bowl|playoffs?|league|"
+    r"baseball|football|basketball|soccer|tennis|golf|cricket|olympic\w*|vs\.?|match|game)\b",
+    "economy": r"\b(cpi|inflation|gdp|unemployment|jobless|payrolls?|federal funds|fed|ecb|interest rates?|hike|bps|"
+    r"recession|earnings|revenue|employees|layoffs|tariffs?)\b",
+    "election": r"\b(elect\w*|seats?|senate|house race|governor\w*|mayor\w*|nomin\w*|primary|referendum|ballot|premier|"
+    r"parliament\w*|win the)\b",
+}
+
+
+@functools.lru_cache(maxsize=None)
+def kind(question: str) -> str:
+    return next((name for name, pattern in KINDS.items() if re.search(pattern, question, re.I)), "other")
+
+
+def labels(row: dict) -> set[str]:
+    """What a rule may leave out: where the question came from, and roughly what it is about."""
+    return {f"source {row['source']}", f"kind {kind(row['question'])}"}
+
+
+def family(row: dict) -> str:
+    """The same for questions that differ only in a number or a named option, such as one market's price brackets."""
+    return re.sub(r"\[yes:.*|[\d.,$%]+", "", row["question"].lower()).strip()
+
+
+def answered(rows: list[dict], rule: dict) -> list[dict]:
+    return [row for row in confident(rows, rule["below"], rule["above"]) if not labels(row) & set(rule["skip"])]
+
+
+def choose_rule(rows: list[dict], target: float) -> dict | None:
+    """The rule that answers the most of `rows` while being right at least `target` of the time.
+
+    For each pair of cut-offs, the weakest kind of question is left out, one at a time, until
+    the target is met or nothing weak is left.
+    """
+    best, most = None, 0
+    for below in BELOW:
+        for above in ABOVE:
+            rule = {"below": below, "above": above, "skip": []}
+            while True:
+                kept = answered(rows, rule)
+                overall = score(kept)["accuracy"]
+                if overall >= target or not kept:
+                    break
+                parts = {
+                    label: score([row for row in kept if label in labels(row)])
+                    for label in set().union(*map(labels, kept))
+                }
+                weak = {
+                    label: part["accuracy"]
+                    for label, part in parts.items()
+                    if part["questions"] >= SMALLEST_GROUP and part["accuracy"] < overall
+                }
+                if not weak:
+                    break
+                rule["skip"].append(min(weak, key=weak.get))
+            if overall >= target and len(kept) > most:
+                best, most = rule, len(kept)
+    return best
+
+
+def _rule_text(rule: dict) -> str:
+    skip = f", leaving out {' and '.join(rule['skip'])}" if rule["skip"] else ""
+    return f"answer when the forecast is under {rule['below']:.0%} or over {rule['above']:.0%}{skip}"
+
+
+def tune_text(label: str, target: float = 0.9) -> str:
+    """Choose an answering rule on one half of the results and score it on the other half.
+
+    A rule's score on the questions it was chosen on is flattering (92% became 76% on fresh
+    questions the first time), so only the other half's score counts. Questions of one
+    family stay in one half, or one market's price brackets would sit on both sides.
+    """
+    rows = results(label)
+    halves: tuple[list, list] = ([], [])
+    for row in rows:
+        halves[hashlib.sha256(family(row).encode()).digest()[0] % 2].append(row)
+    lines = [
+        f"\n### Tuning '{label}' to be right {target:.0%} of the time: {len(rows)} questions in two halves",
+        "Each rule is chosen on one half and tested on the other, which had no part in choosing it.",
+    ]
+    for chosen_on, fresh in (halves, halves[::-1]):
+        rule = choose_rule(chosen_on, target)
+        if not rule:
+            lines.append(f"- No rule reached {target:.0%} on a half of {len(chosen_on)} questions.")
+            continue
+        seen, test = score(answered(chosen_on, rule)), score(answered(fresh, rule))
+        verdict = "holds" if test["low"] >= target else "reached, but not yet proven" if test["accuracy"] >= target else "does not hold"
+        lines.append(
+            f"- Rule: {_rule_text(rule)}. Where it was chosen: {seen['accuracy']:.0%} on {seen['questions']} of {len(chosen_on)}. "
+            f"**On the other half: {test['accuracy']:.0%} right on {test['questions']} of {len(fresh)}** "
+            f"({test['questions'] / max(1, len(fresh)):.0%} answered; 95% range {test['low']:.0%} to {test['high']:.0%}): {verdict}."
+        )
+    lines.append("The ranges treat questions as independent. Many turn on the same event, so the true ranges are wider.")
+    lines += ["", "By source and kind (every answer, then answers outside the 25% to 75% band):", "| | Questions | Right | Confident answers | Right |", "|---|---|---|---|---|"]
+    for name in sorted({label for row in rows for label in labels(row)}):
+        part = [row for row in rows if name in labels(row)]
+        every, sure = score(part), score(confident(part))
+        lines.append(f"| {name} | {every['questions']} | {every['accuracy']:.0%} | {sure['questions']} | {sure['accuracy']:.0%} |")
+    overall = choose_rule(rows, target)
+    if overall:
+        lines.append(f"\nChosen on every question (so its own score would flatter it): {_rule_text(overall)}.")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["probe", "run", "report"])
+    parser.add_argument("command", choices=["probe", "run", "report", "tune"])
+    parser.add_argument("--target", type=float, default=0.9, help="for tune: the share of answers that should be right")
     parser.add_argument("--count", type=int, default=12, help="exam questions to sit in this run")
     parser.add_argument("--label", default="baseline", help="a name for this setup, so setups can be compared")
     parser.add_argument("--only", default="", help="sit only questions whose text matches this pattern")
@@ -345,5 +461,7 @@ if __name__ == "__main__":
         asyncio.run(probe())
     elif args.command == "run":
         asyncio.run(sit(args.count, args.label, args.only, exam_sets() if args.set == "all" else args.set.split(",")))
+    elif args.command == "tune":
+        print(tune_text(args.label, args.target))
     else:
         print(report_text(args.label, None if args.set in ("all", EXAM_SET) else args.set.split(",")))

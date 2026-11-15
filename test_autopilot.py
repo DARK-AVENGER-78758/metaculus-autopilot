@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import os
 import tempfile
@@ -749,6 +750,20 @@ def test_exam_keeps_resolved_market_questions_and_scores_them():
     assert [row["forecast"] for row in bench.confident(mixed)] == [0.1, 0.75, 0.9]
     # 0.9 is confident and 0.7 is not, so the 8 right answers count and the 2 wrong ones are skipped.
     assert "**100% right** on 8 of 10 questions (80% answered" in text
+
+    # Tuning: stock questions are confident and half wrong, so a 90% rule has to leave them out.
+    words = ["".join(pair) for pair in itertools.product("bdgjkmqz", repeat=2)]
+    sat = [{"source": "kalshi", "question": f"Will the {word} stock rise?", "forecast": 0.9, "outcome": n % 2} for n, word in enumerate(words)]
+    sat += [{"source": "kalshi", "question": f"Will {word} sign the bill?", "forecast": 0.9, "outcome": 1} for word in words]
+    sat += [{"source": "kalshi", "question": f"Will {word} veto the bill?", "forecast": 0.72, "outcome": n % 2} for n, word in enumerate(words)]
+    rule = bench.choose_rule(sat, 0.9)
+    assert rule["above"] == 0.75 and rule["skip"] == ["kind price"] and len(bench.answered(sat, rule)) == len(words)
+    assert bench.choose_rule([row for row in sat if "stock" in row["question"]], 0.9) is None  # nothing reaches it
+    assert bench.family({"question": "Will oil be >98.99 on Nov 3? [Yes: $99 or above]"}) == bench.family({"question": "Will oil be >74.99 on Nov 3? [Yes: $75 or above]"})
+    with setting(bench, "BENCH", hooks.STATE_DIR):
+        (hooks.STATE_DIR / "results-tuned.jsonl").write_text("\n".join(json.dumps(row) for row in sat), encoding="utf-8")
+        text = bench.tune_text("tuned", 0.9)
+    assert text.count("leaving out kind price") == 3 and text.count("On the other half: 100% right") == 2
 
 
 def test_run_skips_questions_about_to_close_and_gathers_evidence_in_parallel():

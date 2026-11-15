@@ -494,6 +494,7 @@ class Autopilot(FallTemplateBot2026):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.states: dict[int, dict] = {}  # question key -> state, filled by run()
+        self.samples: dict[int, list[float]] = {}  # question key -> each sample's yes/no forecast, kept by bench.py
 
     @classmethod
     def _llm_config_defaults(cls) -> dict[str, str | GeneralLlm | None]:
@@ -551,6 +552,7 @@ class Autopilot(FallTemplateBot2026):
 
     async def _aggregate_predictions(self, predictions: list, question: MetaculusQuestion):
         if isinstance(question, BinaryQuestion):
+            self.samples[_key(question)] = [float(sample) for sample in predictions]
             # Under log scoring one confident miss costs far more than a confident hit earns.
             return min(0.98, max(0.02, float(np.median(predictions))))
         if isinstance(question, MultipleChoiceQuestion):

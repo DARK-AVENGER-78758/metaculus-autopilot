@@ -176,6 +176,16 @@ each run's summary page, and the results file is attached to the run.
 On Metaculus itself, leaving a question unanswered scores zero, so this rule is for
 measuring accuracy, not something the live bot applies.
 
+### Tuning the rule
+
+`uv run python bench.py tune --label ultra --target 0.9` looks for the rule that answers the
+most questions while being right 90% of the time. A rule is a pair of cut-offs, plus kinds
+of question to leave out (by source, and by a keyword guess at the topic). It chooses the
+rule on one half of the results and scores it on the other half, then swaps the halves.
+Only the other-half score counts: a rule always looks good on the questions it was chosen
+on. Questions that differ only in a number, such as one market's price brackets, are kept
+in the same half.
+
 ## Two things to decide before the prize tournament
 
 - **NVIDIA's terms.** The free API is for "internal testing and evaluation purposes, not in
