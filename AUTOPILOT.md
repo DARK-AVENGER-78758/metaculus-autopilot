@@ -148,6 +148,34 @@ Metaculus hides outcomes and community forecasts from bot accounts, so its own q
 cannot be used as an exam. To measure a change: `uv run python bench.py run --label <name>`
 in batches (it resumes), then `uv run python bench.py report --label <name>`.
 
+### Answering only when confident
+
+In its own middle band (forecasts between 30% and 70%) the bot did no better than saying
+50%. So one way to raise accuracy is to count only the questions where its forecast is
+under 25% or over 75%, and leave the rest unanswered.
+
+| Questions | Right when confident | Share answered |
+|---|---|---|
+| The 90 the cut-off was chosen on | 92% (47 of 51) | 57% |
+| 34 other questions, from the 27 September set | 76% (16 of 21) | 62% |
+| All 124 | 88% (range 78% to 93%) | 58% |
+
+The rule lifts accuracy from 76% into the high 80s. It has not been shown to hold at 90%
+on new questions, and 21 held-out answers are too few to say where it settles. The misses
+that remain are confident and wrong for one reason: the bot did not know a current number
+(a team's win total, a film's review score, who led a statistic). A check that the
+evidence states that number was tried and removed, because in a replay almost no evidence
+passes it.
+
+The **Exam on resolved questions** workflow settles this at scale. About 1,150 resolved
+questions exist in the sets the exam model cannot have seen in training, with roughly 100
+more every two weeks. The first run works through that backlog, about 1,000 questions in
+five hours; the daily run after that sits whatever has newly resolved. The score is on
+each run's summary page, and the results file is attached to the run.
+
+On Metaculus itself, leaving a question unanswered scores zero, so this rule is for
+measuring accuracy, not something the live bot applies.
+
 ## Two things to decide before the prize tournament
 
 - **NVIDIA's terms.** The free API is for "internal testing and evaluation purposes, not in

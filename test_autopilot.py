@@ -744,6 +744,12 @@ def test_exam_keeps_resolved_market_questions_and_scores_them():
         text = bench.report_text("trial")
     assert "| Bot | 80% |" in text and "| Crowd on the freeze date | 100% |" in text and "Largest misses" in text
 
+    # Answering only when confident: forecasts inside the coin-flip band are left out.
+    mixed = [{"forecast": chance, "outcome": int(chance > 0.5)} for chance in (0.1, 0.3, 0.5, 0.7, 0.75, 0.9)]
+    assert [row["forecast"] for row in bench.confident(mixed)] == [0.1, 0.75, 0.9]
+    # 0.9 is confident and 0.7 is not, so the 8 right answers count and the 2 wrong ones are skipped.
+    assert "**100% right** on 8 of 10 questions (80% answered" in text
+
 
 def test_run_skips_questions_about_to_close_and_gathers_evidence_in_parallel():
     busy, peak, lock = [0], [0], threading.Lock()

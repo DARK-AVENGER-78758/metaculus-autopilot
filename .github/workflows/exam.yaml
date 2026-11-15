@@ -1,0 +1,74 @@
+name: Exam on resolved questions
+
+# Sits ForecastBench questions that have already resolved and scores the bot against what
+# happened. It posts nothing to Metaculus. Results build up between runs, so each run only
+# sits questions that are new or have newly resolved. See bench.py and AUTOPILOT.md.
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Most questions to sit in this run"
+        default: "1000"
+      label:
+        description: "A name for this setup, so setups can be compared"
+        default: "ultra"
+  schedule:
+    - cron: "40 1 * * *" # daily: the first run works through the backlog, later runs sit what resolved since
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  exam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # GitHub stops a job at 360; results sat so far are kept either way
+    env:
+      LABEL: ${{ inputs.label || 'ultra' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Restore earlier results
+        uses: actions/cache/restore@v4
+        with:
+          path: bench
+          key: exam-${{ github.run_id }}
+          restore-keys: exam-
+      - name: Sit the exam
+        run: |
+          rm -f bench/*-resolutions.json # outcomes are updated daily, so fetch them again
+          uv run python bench.py run --set all --count ${{ inputs.count || 1000 }} --label "$LABEL"
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          GITHUB_TOKEN: ${{ github.token }} # only to list the public question sets
+          # One fast model keeps a thousand questions inside a single run. The live bot uses three.
+          FORECAST_MODELS: nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b
+          FORECAST_SAMPLES: 4
+          REQUESTS_PER_MINUTE: 36
+          EXAM_PARALLEL: 8
+      - name: Score everything sat so far
+        if: always()
+        run: uv run python bench.py report --set all --label "$LABEL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save results for the next run
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: bench
+          key: exam-${{ github.run_id }}
+      - name: Keep the results file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exam-results
+          path: bench/results-*.jsonl
+          retention-days: 90

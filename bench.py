@@ -3,6 +3,7 @@
     uv run python bench.py probe             call every model in the pool once and report what works
     uv run python bench.py run --count 12    sit the next 12 exam questions (resumes where it stopped)
     uv run python bench.py report            score everything sat so far
+    Add --set all to use every question set, or --set 2026-09-27 for one.
 
 The exam is ForecastBench (github.com/forecastingresearch/forecastbench-datasets, CC BY-SA):
 yes/no questions that have since resolved, each with the true outcome and the crowd's forecast
@@ -22,6 +23,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import sys
 import time
@@ -40,9 +42,13 @@ from forecasting_tools import BinaryQuestion, QuestionState
 
 BENCH = Path("bench")  # downloads, replayed evidence and results; ignored by git
 DATASETS = "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets"
-EXAM_SET = "2026-10-11"  # the newest set whose questions have had a month to resolve
+EXAM_SET = "2026-10-11"  # the set the confidence cut-off was chosen on
+EXAM_SINCE = "2026-06-21"  # the first set frozen after the exam model (Nemotron 3 Ultra, June 2026) was released
 MARKET_SOURCES = ("metaculus", "polymarket", "kalshi", "manifold", "infer")  # "will X happen" questions
-PARALLEL = 3  # exam questions sat at the same time
+PARALLEL = int(os.getenv("EXAM_PARALLEL") or 3)  # exam questions sat at the same time
+# The bot answers only when its own forecast is outside this middle band. Inside it, the bot
+# did no better than saying 50% (Brier 0.265 against 0.250 on the first 90 questions).
+CONFIDENT_BELOW, CONFIDENT_ABOVE = 0.25, 0.75
 
 PROMPT = (
     "A fair coin is flipped three times. What is the probability of exactly two heads? "
@@ -166,14 +172,39 @@ def results(label: str) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
 
 
-async def sit(count: int, label: str, only: str = "", set_date: str = EXAM_SET) -> None:
-    """Forecast the next `count` exam questions and append each result as soon as it is in."""
-    rows = [row for row in exam(set_date) if re.search(only, row["question"], re.I)]
-    done = {row["id"] for row in results(label)}
-    todo = [row for row in rows if row["id"] not in done][:count]
-    if not todo:
-        print(f"All {len(rows)} exam questions have been sat for '{label}'.")
-        return
+def exam_sets() -> list[str]:
+    """Every question set the exam model cannot have seen in training, oldest first."""
+    token = os.getenv("GITHUB_TOKEN")  # GitHub's shared runners hit the anonymous limit without it
+    listing = requests.get(
+        "https://api.github.com/repos/forecastingresearch/forecastbench-datasets/contents/datasets/resolution_sets",
+        headers={"Authorization": f"Bearer {token}"} if token else {},
+        timeout=30,
+    )
+    listing.raise_for_status()
+    names = [entry["name"] for entry in listing.json()]
+    return sorted(name[:10] for name in names if name.endswith("_resolution_set.json") and name[:10] >= EXAM_SINCE)
+
+
+async def sit(count: int, label: str, only: str = "", sets: list[str] | None = None) -> None:
+    """Forecast up to `count` exam questions not yet sat, appending each result as soon as it is in.
+
+    A question that appears in several sets is sat once, so every result is a different question.
+    """
+    sat = {row["id"] for row in results(label)}
+    for set_date in sets or [EXAM_SET]:
+        rows = [row for row in exam(set_date) if row["id"] not in sat and re.search(only, row["question"], re.I)]
+        todo = rows[:count]
+        if not todo:
+            continue
+        await _sit_set(todo, label, set_date)
+        sat |= {row["id"] for row in todo}
+        count -= len(todo)
+        if count <= 0:
+            break
+    print(report_text(label))
+
+
+async def _sit_set(todo: list[dict], label: str, set_date: str) -> None:
     autopilot.AS_OF = datetime.fromisoformat(todo[0]["freeze_datetime"])  # one freeze date per set
     hooks.STATE_DIR = BENCH / f"state-{label}"  # replayed evidence stays apart from the live bot's
     bot = autopilot.Autopilot(
@@ -201,9 +232,10 @@ async def sit(count: int, label: str, only: str = "", set_date: str = EXAM_SET) 
                 print(f"FAILED {row['question'][:70]}: {str(report)[:160]}")
                 return
             line = {
-                "id": row["id"], "source": row["source"], "question": row["question"], "outcome": row["outcome"],
-                "crowd": row["crowd"], "forecast": report.prediction, "evidence": len(state["evidence"]),
-                "seconds": round(time.monotonic() - started), "models": models.FORECAST_MODELS,
+                "id": row["id"], "set": set_date, "source": row["source"], "question": row["question"],
+                "outcome": row["outcome"], "crowd": row["crowd"], "forecast": report.prediction,
+                "evidence": len(state["evidence"]), "seconds": round(time.monotonic() - started),
+                "models": models.FORECAST_MODELS,
             }
             with open(BENCH / f"results-{label}.jsonl", "a", encoding="utf-8") as out:
                 out.write(json.dumps(line) + "\n")
@@ -211,7 +243,6 @@ async def sit(count: int, label: str, only: str = "", set_date: str = EXAM_SET) 
             print(f"{verdict}  bot {report.prediction:.0%}  crowd {row['crowd']}  outcome {row['outcome']}  {row['question'][:80]}")
 
     await asyncio.gather(*[one(row) for row in todo])
-    print(report_text(label))
 
 
 # ---------------------------------------------------------------- scoring
@@ -241,14 +272,25 @@ def score(rows: list[dict], key: str = "forecast") -> dict:
     }
 
 
-def report_text(label: str) -> str:
-    rows = results(label)
+def confident(rows: list[dict], below: float = CONFIDENT_BELOW, above: float = CONFIDENT_ABOVE) -> list[dict]:
+    """The questions the bot would answer: its own forecast is outside the coin-flip band."""
+    return [row for row in rows if row["forecast"] <= below or row["forecast"] >= above]
+
+
+def report_text(label: str, sets: list[str] | None = None) -> str:
+    rows = [row for row in results(label) if not sets or row.get("set", EXAM_SET) in sets]
     if not rows:
         return f"No results yet for '{label}'."
     bot, crowd = score(rows), score(rows, "crowd")
+    sure = score(confident(rows))
     no_share = sum(not row["outcome"] for row in rows) / len(rows)
     lines = [
-        f"\n### Exam '{label}': {bot['questions']} resolved yes/no questions",
+        f"\n### Exam '{label}': {bot['questions']} resolved yes/no questions" + (f" from {', '.join(sets)}" if sets else ""),
+        f"**Answering only when confident** (its forecast is under {CONFIDENT_BELOW:.0%} or over {CONFIDENT_ABOVE:.0%}): "
+        f"**{sure['accuracy']:.0%} right** on {sure['questions']} of {len(rows)} questions "
+        f"({sure['questions'] / len(rows):.0%} answered; 95% range {sure['low']:.0%} to {sure['high']:.0%}).",
+        "",
+        "Answering everything:",
         "| | Accuracy | 95% range | Brier (lower is better) |",
         "|---|---|---|---|",
         f"| Bot | {bot['accuracy']:.0%} | {bot['low']:.0%} to {bot['high']:.0%} | {bot['brier']:.3f} |",
@@ -262,6 +304,24 @@ def report_text(label: str) -> str:
         band = [row for row in rows if low <= row["forecast"] < high]
         if band:
             lines.append(f"- forecast {low:.0%} to {min(high, 1):.0%}: {len(band)} questions, {sum(row['outcome'] for row in band) / len(band):.0%} resolved Yes")
+    lines.append("\nWhat other cut-offs would give:")
+    for edge in (0.35, 0.3, 0.25, 0.2, 0.15, 0.1):
+        kept = score(confident(rows, edge, 1 - edge))
+        if kept["questions"]:
+            lines.append(
+                f"- under {edge:.0%} or over {1 - edge:.0%}: {kept['accuracy']:.0%} right on {kept['questions']} "
+                f"({kept['questions'] / len(rows):.0%} answered; range {kept['low']:.0%} to {kept['high']:.0%})"
+            )
+    by_set = sorted({row.get("set", EXAM_SET) for row in rows})
+    if len(by_set) > 1:
+        lines.append("\nBy question set (all answers, then confident answers only):")
+        for name in by_set:
+            part = [row for row in rows if row.get("set", EXAM_SET) == name]
+            every, sure_part = score(part), score(confident(part))
+            lines.append(
+                f"- {name}: {every['accuracy']:.0%} on {every['questions']}; "
+                f"confident {sure_part['accuracy']:.0%} on {sure_part['questions']}"
+            )
     misses = sorted(rows, key=lambda row: -abs(row["forecast"] - row["outcome"]))[:6]
     lines.append("\nLargest misses:")
     for row in misses:
@@ -275,12 +335,15 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=12, help="exam questions to sit in this run")
     parser.add_argument("--label", default="baseline", help="a name for this setup, so setups can be compared")
     parser.add_argument("--only", default="", help="sit only questions whose text matches this pattern")
+    parser.add_argument(
+        "--set", default=EXAM_SET, help="question set date, several separated by commas, or 'all' for every usable set"
+    )
     args = parser.parse_args()
     sys.stdout.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING)
     if args.command == "probe":
         asyncio.run(probe())
     elif args.command == "run":
-        asyncio.run(sit(args.count, args.label, args.only))
+        asyncio.run(sit(args.count, args.label, args.only, exam_sets() if args.set == "all" else args.set.split(",")))
     else:
-        print(report_text(args.label))
+        print(report_text(args.label, None if args.set in ("all", EXAM_SET) else args.set.split(",")))
