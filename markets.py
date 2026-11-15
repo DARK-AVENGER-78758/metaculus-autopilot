@@ -44,7 +44,8 @@ PRIVATE = Path(os.getenv("PRIVATE_DIR") or "private")
 AUTO_MARKETS = int(os.getenv("AUTO_MARKETS") or 6)  # busiest markets closing in 3 to 90 days, watched unasked
 NEAR_MARKETS = int(os.getenv("NEAR_MARKETS") or 6)  # busiest markets closing within 3 days: they grade the bot quickly
 PRICE_MOVE = float(os.getenv("PRICE_MOVE") or 0.1)  # a price change this large is worth telling the owner
-EDGE = 0.1  # the bot's view must differ from the price by this much before it changes the advice
+EDGE = 0.1  # the bot's view differs from the price by this much: worth saying, though not worth acting on
+NEARLY_WON = 0.9  # at this price a winning bet has little left to gain, so locking it in is worth a thought
 UNTESTED = "No watched market has resolved yet. In tests on past questions the market price was right more often than the bot."
 
 
@@ -116,8 +117,10 @@ def price_move(link: str, price: float, state: dict) -> list[str]:
 def guidance(bet: dict, price: float, forecast: float | None) -> tuple[str, str]:
     """What the bot would do with a bet the owner holds: (kind of advice, the sentence).
 
-    The owner's own target and stop come first. After that the bot compares its forecast with
-    the price: it only argues with the price when the two are EDGE apart.
+    The owner's own target and stop come first, then a bet that is nearly won. The bot's own
+    forecast is reported but never turned into "sell" or "switch": on 279 resolved questions
+    with a market price, the price was right 83% of the time when the two disagreed, and
+    mixing any of the bot's forecast into the price made it less accurate.
     """
     yes = bet["side"] == "yes"
     mine = price if yes else 1 - price  # what the owner's side sells for now
@@ -126,15 +129,20 @@ def guidance(bet: dict, price: float, forecast: float | None) -> tuple[str, str]
         return "target", f"Cash out: {status}, at your target of {bet['target']:.0%}"
     if bet.get("stop") and mine <= bet["stop"]:
         return "stop", f"Cut the loss: {status}, at your stop of {bet['stop']:.0%}"
+    if mine >= NEARLY_WON and mine > bet["bought"]:
+        return "cash out", (
+            f"Consider cashing out: {status}. Holding to the end can add at most {1 / mine - 1:+.0%}, "
+            f"and the whole stake stays at risk"
+        )
     if forecast is None:
         return "hold", f"Hold for now: {status}. The bot has not forecast this market yet"
     fair = forecast if yes else 1 - forecast  # the bot's chance that the owner's side wins
-    view = f"the bot gives your side {fair:.0%}"
-    if fair <= mine - EDGE and mine > bet["bought"]:
-        return "cash out", f"Consider cashing out: {status}, and {view}, below the price"
-    if fair <= mine - EDGE:
-        return "cut", f"Consider cutting the loss: {status}, and {view}, below the price"
-    return "hold", f"Hold: {status}, and {view}, {'above' if fair >= mine + EDGE else 'close to'} the price"
+    if abs(fair - mine) >= EDGE:
+        return "hold", (
+            f"Hold: {status}. The bot gives your side {fair:.0%}, but where bot and price have "
+            f"disagreed the price has usually been right, so that is no reason to act"
+        )
+    return "hold", f"Hold: {status}, and the bot agrees with the price ({fair:.0%})"
 
 
 def read_ledger() -> list[dict]:

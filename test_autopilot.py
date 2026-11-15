@@ -640,11 +640,15 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     bet = {"side": "yes", "bought": 0.32, "target": 0.45, "stop": 0.25}
     assert markets.guidance(bet, 0.46, 0.9)[0] == "target" and "(+44%)" in markets.guidance(bet, 0.46, 0.9)[1]
     assert markets.guidance(bet, 0.24, 0.9)[0] == "stop"  # the owner's own limits come before the bot's view
-    assert markets.guidance(bet, 0.40, 0.25) == ("cash out", "Consider cashing out: your Yes bet bought at 32% is now 40% (+25%), and the bot gives your side 25%, below the price")
-    assert markets.guidance(bet, 0.30, 0.15)[0] == "cut" and markets.guidance(bet, 0.30, None)[0] == "hold"
-    assert "above the price" in markets.guidance(bet, 0.40, 0.6)[1] and "close to the price" in markets.guidance(bet, 0.40, 0.45)[1]
+    # The bot's own view is reported, never turned into "sell": when it disagreed with a price, the price was usually right.
+    kind, advice = markets.guidance(bet, 0.40, 0.25)
+    assert kind == "hold" and "is now 40% (+25%)" in advice and "The bot gives your side 25%" in advice and "no reason to act" in advice
+    assert markets.guidance(bet, 0.30, 0.15)[0] == "hold" and markets.guidance(bet, 0.30, None)[0] == "hold"
+    assert markets.guidance(bet, 0.40, 0.45)[1].endswith("the bot agrees with the price (45%)")
     held_no = {"side": "no", "bought": 0.4}  # a No bet gains when the Yes price falls
-    assert "is now 70% (+75%)" in markets.guidance(held_no, 0.30, 0.3)[1] and markets.guidance(held_no, 0.30, 0.6)[0] == "cash out"
+    assert "is now 70% (+75%)" in markets.guidance(held_no, 0.30, 0.3)[1] and markets.guidance(held_no, 0.30, 0.6)[0] == "hold"
+    kind, advice = markets.guidance(held_no, 0.08, 0.5)  # nearly won: little left to gain
+    assert kind == "cash out" and "is now 92% (+130%)" in advice and "at most +9%" in advice
 
     state, link = {}, "[A?](https://polymarket.com/market/a)"
     assert markets.price_move(link, 0.30, state) == [] and markets.price_move(link, 0.36, state) == []  # first sight, then a small move

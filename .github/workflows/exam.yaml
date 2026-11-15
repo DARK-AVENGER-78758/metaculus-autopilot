@@ -53,8 +53,8 @@ jobs:
           # One fast model keeps a thousand questions inside a single run. The live bot uses three.
           FORECAST_MODELS: nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b
           FORECAST_SAMPLES: 4
-          REQUESTS_PER_MINUTE: 36
-          EXAM_PARALLEL: 8
+          REQUESTS_PER_MINUTE: 22 # the hourly market watch shares the key's limit of about 40 a minute
+          EXAM_PARALLEL: 5
       - name: Score everything sat so far
         if: always()
         run: uv run python bench.py report --set all --label "$LABEL" >> "$GITHUB_STEP_SUMMARY"

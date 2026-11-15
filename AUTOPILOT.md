@@ -154,13 +154,22 @@ public, so none of it is written or printed here.
 
 1. Your target is reached: "Cash out".
 2. Your stop is hit: "Cut the loss".
-3. Otherwise the bot compares its forecast with the price. If it rates your side 10 points
-   or more below the price, it says "Consider cashing out" when you are ahead and
-   "Consider cutting the loss" when you are behind. Otherwise "Hold".
+3. Your side is priced at 90% or more and you are ahead: "Consider cashing out", because
+   little is left to gain and the whole stake is still at risk.
+4. Otherwise "Hold", with the bot's own forecast for your side next to the price.
 
 You are told when the advice changes, not every hour. Every alert ends with the bot's live
-record against the market price, so you can see how much weight its view deserves. It does
-not suggest opening new bets or switching sides: on past questions that lost money.
+record against the market price.
+
+The bot's forecast is reported but never turned into "sell", "buy" or "switch sides". That
+is what the test on resolved questions says to do. On 279 questions with a market price:
+
+| Test | Result |
+|---|---|
+| Bot and price on opposite sides of 50% (46 questions) | Price right 83%, bot right 17% |
+| Mixing the bot's forecast into the price | Every mix was less accurate than the price alone |
+| Paper bets on the bot's side at a 10-point gap | 118 bets, 30 won, 44% of the stake lost |
+| Paper bets by kind of question and by source | A loss in every group |
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a
@@ -243,9 +252,10 @@ passes it.
 
 The **Exam on resolved questions** workflow settles this at scale. About 1,150 resolved
 questions exist in the sets the exam model cannot have seen in training, with roughly 100
-more every two weeks. The first run works through that backlog, about 1,000 questions in
-five hours; the daily run after that sits whatever has newly resolved. The score is on
-each run's summary page, and the results file is attached to the run.
+more every two weeks. Each run sits about 200 questions before GitHub's time limit stops
+it (the first managed 277, not the 1,000 first estimated), so the daily run works through
+the backlog over several nights and then sits whatever has newly resolved. The score is
+on each run's summary page, and the results file is attached to the run.
 
 On Metaculus itself, leaving a question unanswered scores zero, so this rule is for
 measuring accuracy, not something the live bot applies.
@@ -259,6 +269,24 @@ rule on one half of the results and scores it on the other half, then swaps the 
 Only the other-half score counts: a rule always looks good on the questions it was chosen
 on. Questions that differ only in a number, such as one market's price brackets, are kept
 in the same half.
+
+### After 384 questions (2026-11-15)
+
+| Measure | Bot | Market or crowd |
+|---|---|---|
+| Right side of 50%, all 384 questions | 75% (range 70% to 79%) | 84% |
+| Brier score, lower is better | 0.168 | 0.115 |
+| Right when its forecast is under 25% or over 75% (63% of questions) | 86% | |
+| Right when its forecast is under 10% or over 90% (30% of questions) | 93% (range 87% to 96%) | |
+
+- **Where 90% holds.** Only when the bot is very sure. The rule "answer under 10% or over
+  95%" was chosen on one half of the questions and scored 98% on 49 answers in the other
+  half (range 89% to 100%). The wider rule "under 30% or over 70%" fell from 91% to 78%.
+- **Against market prices the bot has no edge.** See the table under "Watching Polymarket
+  markets". When the bot is very sure, the price is usually just as sure, so being right
+  there earns nothing.
+- **Its worst misses** are confident answers to questions about a current standing (who
+  leads a statistic, a film's review score) that it could not look up in a replay.
 
 ## Two things to decide before the prize tournament
 
