@@ -13,6 +13,7 @@ concurrency:
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
+    timeout-minutes: 60 # a hung run must not hold the lane for hours
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
@@ -28,7 +29,7 @@ jobs:
         run: uv sync --locked
       - name: Run bot
         run: |
-          uv run python main.py --mode test_questions
+          uv run python autopilot.py --mode test_questions
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -40,3 +41,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }} # optional: Jev scores headlines instead of an LLM
+          # Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables)
+          FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
+          UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
+          MAX_FORECASTS_PER_RUN: 2 # a smoke test: two practice questions, about 20 minutes
+          CRITIC: ${{ vars.CRITIC }}
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
+          FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
+          TOURNAMENT_IDS: ${{ vars.TOURNAMENT_IDS }}

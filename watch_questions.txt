@@ -1,0 +1,9 @@
+# Questions the watch lane keeps up to date. One Metaculus URL per line.
+#   A question URL watches that one question.
+#   A tournament URL watches every open question in that tournament.
+# For each question the bot writes its own news and social hooks, re-polls them every
+# 3 hours, and updates its forecast when material news arrives or the forecast is a week old.
+# Do not list the FutureEval or MiniBench tournaments here: their rules allow one forecast
+# per question, and the tournament workflow already handles them.
+
+https://www.metaculus.com/tournament/metaculus-cup-fall-2026/

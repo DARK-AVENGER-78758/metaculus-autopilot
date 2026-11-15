@@ -2,8 +2,10 @@ name: Forecast on new AI tournament questions
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. Make sure to skip already-forecasted questions!
+  # The schedule is switched off until the bot is cleared to forecast live questions.
+  # To switch it on, remove the '# ' from the two lines below.
+  # schedule:
+  #   - cron: "2,17,32,47 * * * *" # every 15 min: questions stay open 3 hours and GitHub sometimes skips a run
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -15,6 +17,7 @@ concurrency:
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
+    timeout-minutes: 60 # a hung run must not hold the lane for hours
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
@@ -30,7 +33,7 @@ jobs:
         run: uv sync --locked
       - name: Run bot
         run: |
-          uv run python main.py
+          uv run python autopilot.py --mode tournament
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -42,3 +45,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }} # optional: Jev scores headlines instead of an LLM
+          # Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables)
+          FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
+          UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
+          MAX_FORECASTS_PER_RUN: ${{ vars.MAX_FORECASTS_PER_RUN }}
+          CRITIC: ${{ vars.CRITIC }}
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
+          FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
+          TOURNAMENT_IDS: ${{ vars.TOURNAMENT_IDS }}

@@ -1,9 +1,11 @@
-name: Forecast on Metaculus Cup
+name: Watch long-running questions
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 */2 * *" # runs at midnight every 2 days
+  # The schedule is switched off until the bot is cleared to forecast live questions.
+  # To switch it on, remove the '# ' from the two lines below.
+  # schedule:
+  #   - cron: "23 */3 * * *" # every 3 hours: re-poll each watched question's hooks
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -11,10 +13,14 @@ concurrency:
   cancel-in-progress: false
 
 
-# Daily job to run the simple forecast bot
+# Updates forecasts on the questions listed in watch_questions.txt
 jobs:
   forecast_job:
     runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
+    timeout-minutes: 120 # a hung run must not hold the lane for hours
+    permissions:
+      contents: read
+      actions: write # only for the keep-alive step at the end
     steps: # sets up the steps that will be run in order
       # setup repository with all necessary dependencies - keep as is
       - name: Check out repository
@@ -28,9 +34,17 @@ jobs:
           version: "0.13.1"
       - name: Install dependencies
         run: uv sync --locked
+      # Hooks, seen headlines and forecast times live in state/. It is a cache: if it is ever
+      # lost the bot rebuilds it, at the cost of one extra forecast per watched question.
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: watch-state-${{ github.run_id }}
+          restore-keys: watch-state-
       - name: Run bot
         run: |
-          uv run python main.py --mode metaculus_cup
+          uv run python autopilot.py --mode watch
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -42,3 +56,33 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }} # optional: Jev scores headlines instead of an LLM
+          # Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables)
+          FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
+          UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
+          MAX_FORECASTS_PER_RUN: ${{ vars.MAX_FORECASTS_PER_RUN }}
+          CRITIC: ${{ vars.CRITIC }}
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
+          FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
+          TOURNAMENT_IDS: ${{ vars.TOURNAMENT_IDS }}
+      - name: Save bot state
+        if: always()
+        continue-on-error: true # losing the cache only costs a rebuild
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: watch-state-${{ github.run_id }}
+      # GitHub switches off scheduled workflows after 60 days without repository activity.
+      # Re-enabling them through the API resets that clock, so the bot keeps running unattended.
+      - name: Keep the scheduled workflows alive
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in run_bot_on_tournament.yaml run_bot_on_metaculus_cup.yaml review_bot.yaml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$workflow/enable"
+          done

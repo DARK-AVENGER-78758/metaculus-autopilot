@@ -1,6 +1,8 @@
 ###  Specific to Project ###
 benchmarks/
 sandbox.py
+state/
+bench/
 
 
 ### General gitignore ###
