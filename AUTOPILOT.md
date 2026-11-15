@@ -116,6 +116,36 @@ the market's price. The same thing from a terminal:
   market's price was right more often than the bot. When the two disagree, the market is
   the better bet.
 
+### Watching Polymarket markets
+
+The **Watch Polymarket markets** workflow runs every 3 hours and needs nobody at the
+keyboard. It places no bets: it watches, forecasts and tells you.
+
+| Step | What happens |
+|---|---|
+| Pick markets | Your own list, plus the 6 most traded open yes/no markets that are still undecided (price between 5% and 95%) and close in 3 to 90 days |
+| Set hooks | For each market the scout writes news and social searches, as for any question |
+| Trigger on changes | A new market is forecast once. After that it is forecast again only when material news arrives (at most every 12 hours) or after 7 days |
+| Tell you | Each forecast (bot against market price, and the headline that triggered it), any price move of 10 points or more, and any price level you set being crossed |
+
+Settings, in Settings → Secrets and variables → Actions:
+
+| Name | Kind | What it does |
+|---|---|---|
+| `NTFY_TOPIC` | Secret | Where notifications go. Subscribe to the same topic in the free ntfy app, or open `https://ntfy.sh/<topic>` in a browser. Anyone who knows the topic can read it, so keep it private |
+| `POLYMARKET_WATCH` | Secret | Your markets, one link per line. Add levels to be told about: `<link> above=0.45 below=0.2`. It is a secret because this repository's run pages are public |
+| `AUTO_MARKETS` | Variable | How many of the busiest markets to watch unasked. Default 6; 0 watches only your list |
+| `PRICE_MOVE` | Variable | The price change worth a notification. Default 0.1 (10 points) |
+
+Without `NTFY_TOPIC` the workflow still runs; the forecasts and price moves are on each
+run's summary page. Levels you set are only ever sent to your topic, never written there.
+
+**Why it does not bet.** Real-money prediction markets are banned where the owner lives,
+and Polymarket does not allow trading through a VPN. The evidence also says not to: in a
+paper test on 100 resolved Polymarket and Kalshi questions, staking one unit on the bot's
+side wherever it differed from the market price by 5 points or more made 70 bets, won 16,
+and lost 54% of the money staked. Larger gaps did worse, not better.
+
 ### Optional extras
 
 | Secret or variable | What it adds |

@@ -88,6 +88,8 @@ STALE_DAYS = 7  # update a watched question anyway after this long
 MAX_FORECASTS_PER_RUN = int(_env("MAX_FORECASTS_PER_RUN", "6"))  # about 8 minutes each; the rest wait for the next run
 # ponytail: one question at a time. The slower free models take twice as long, and start
 # timing out, when more than two of their calls run at once. Raise this if the roster gets faster.
+AUTO_MARKETS = int(_env("AUTO_MARKETS", "6"))  # market lane: how many of the busiest markets to watch unasked
+PRICE_MOVE = float(_env("PRICE_MOVE", "0.1"))  # market lane: a price change this large is worth telling the user
 BATCH = 1  # questions forecast at the same time
 
 RELEVANCE_SCALE = [
@@ -690,12 +692,14 @@ def load_questions(mode: str, client: MetaculusClient) -> list[MetaculusQuestion
 
 
 async def run(
-    bot: Autopilot, questions: list[MetaculusQuestion], *, one_shot: bool, force: bool = False
+    bot: Autopilot, questions: list[MetaculusQuestion], *, one_shot: bool, force: bool = False, record: bool | None = None
 ) -> tuple[list[ForecastReport | BaseException], list[str]]:
     """Gather evidence for each question, decide which to forecast, forecast them, save state.
 
-    Returns the forecast reports and one summary line per question.
+    Returns the forecast reports and one summary line per question. `record` says whether a
+    forecast made here counts as the question's forecast; by default only a posted one does.
     """
+    record = bot.publish_reports_to_metaculus if record is None else record
     now = _now()
     llm = bot.get_llm("scout", "llm")
     summary: list[str] = []
@@ -763,7 +767,7 @@ async def run(
                 summary.append(f"- FAILED: {link} ({reason}): {str(report)[:200]}")
                 continue
             prediction = type(report).make_readable_prediction(report.prediction)
-            if bot.publish_reports_to_metaculus:  # a dry run must not count as the real forecast
+            if record:  # a dry run must not count as the real forecast
                 state.update(last_forecast_at=now.isoformat(), last_prediction=prediction, pending=[])
                 state["history"] = (
                     state["history"] + [{"at": now.isoformat(), "why": reason, "prediction": prediction}]
@@ -778,9 +782,81 @@ async def run(
     return reports, summary
 
 
+def market_watch() -> list[tuple[dict, dict]]:
+    """Each market to watch with the price levels the user set for it: their list first, then the busiest markets.
+
+    POLYMARKET_WATCH holds one market link per line, optionally followed by levels to be told
+    about, as in `https://polymarket.com/market/some-market above=0.45 below=0.2`.
+    """
+    watch: dict[str, tuple[dict, dict]] = {}
+    for line in os.getenv("POLYMARKET_WATCH", "").splitlines():
+        parts = line.split("#")[0].split()
+        if not parts:
+            continue
+        try:  # one bad line must not stop the other markets
+            levels = {side: float(level) for side, level in (part.split("=") for part in parts[1:])}
+            for row in tools.polymarket(parts[0]):
+                watch[row["id"]] = (row, {side: level for side, level in levels.items() if side in ("above", "below")})
+        except Exception as error:
+            logger.warning(f"Skipping a line of the market watch list: {type(error).__name__}")  # the list is private
+    for row in tools.busiest_markets(AUTO_MARKETS) if AUTO_MARKETS else []:
+        watch.setdefault(row["id"], (row, {}))
+    return list(watch.values())
+
+
+def price_alerts(link: str, price: float, levels: dict[str, float], state: dict) -> tuple[list[str], list[str]]:
+    """What the price has done since the user was last told: (large moves, levels of theirs it crossed).
+
+    The two are kept apart because a run's page is public and the user's levels are not.
+    """
+    told = state.get("price_told")
+    past = lambda value, side, level: value is not None and (value >= level if side == "above" else value <= level)  # noqa: E731
+    crossed = [
+        f"- Price {price:.0%} is now {side} your level of {level:.0%}: {link}"
+        for side, level in levels.items()
+        if past(price, side, level) and not past(told, side, level)
+    ]
+    moves = [f"- Price moved from {told:.0%} to {price:.0%}: {link}"] if told is not None and abs(price - told) >= PRICE_MOVE else []
+    if told is None or crossed or moves:
+        state["price_told"] = price
+    return moves, crossed
+
+
+def notify(lines: list[str]) -> None:
+    """Send the user a phone notification through ntfy.sh, if NTFY_TOPIC is set. A failure is only logged."""
+    topic = os.getenv("NTFY_TOPIC")
+    if not topic or not lines:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{topic}", data="\n".join(lines)[:3900].encode(),
+            headers={"Title": "Market watch", "Markdown": "yes"}, timeout=15,
+        ).raise_for_status()
+    except requests.RequestException as error:
+        logger.warning(f"The notification was not sent: {type(error).__name__}")  # the address holds the topic
+
+
+def watch_markets(bot: Autopilot, tell: bool) -> tuple[list[MetaculusQuestion], list, list[str]]:
+    """The market lane: forecast watched markets when they are new or news breaks, and tell the user. No bets."""
+    watch = market_watch()
+    questions = [as_question(row) for row, _ in watch]
+    reports, summary = asyncio.run(run(bot, questions, one_shot=False, record=tell))
+    private: list[str] = []
+    for (row, levels), question in zip(watch, questions):
+        state = hooks.load_state(_key(question))
+        moves, crossed = price_alerts(f"[{row['question']}]({row['url']})", row["price"], levels, state)
+        if tell:
+            hooks.save_state(_key(question), state)
+        summary += moves
+        private += crossed
+    if tell:
+        notify([line for line in summary if line.startswith(("- Forecast", "- Price"))] + private)
+    return questions, reports, summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the autopilot forecasting bot")
-    parser.add_argument("--mode", choices=["tournament", "watch", "test_questions"], default="tournament")
+    parser.add_argument("--mode", choices=["tournament", "watch", "test_questions", "markets"], default="tournament")
     parser.add_argument("--dry-run", action="store_true", help="forecast but do not post to Metaculus")
     parser.add_argument(
         "--question", nargs="+", metavar="URL",
@@ -802,7 +878,7 @@ def main() -> None:
             "(it starts with nvapi-) and put it in .env"
         )
     markets = [url for url in args.question or [] if "polymarket.com" in url]
-    publish = not args.dry_run and not markets  # a market has no Metaculus page to post to
+    publish = not args.dry_run and not markets and args.mode != "markets"  # a market has no Metaculus page to post to
     print_startup_banner(args.mode, will_publish=publish)
 
     bot = Autopilot(
@@ -823,6 +899,9 @@ def main() -> None:
             )
         ]
         reports, summary = asyncio.run(run(bot, questions, one_shot=False, force=True))
+    elif args.mode == "markets":
+        lane = "market watch"
+        questions, reports, summary = watch_markets(bot, tell=not args.dry_run)
     else:
         lane = f"{args.mode} lane"
         questions = load_questions(args.mode, bot.metaculus_client)

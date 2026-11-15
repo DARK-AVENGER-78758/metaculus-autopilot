@@ -603,6 +603,49 @@ def test_a_polymarket_link_becomes_open_yes_no_questions_with_the_market_price()
     except ValueError:
         pass
 
+    # The busiest markets, minus the settled ones and those closing too soon or too far off.
+    in_days = lambda days: (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    busy = [
+        market("open", 0.4, endDate=in_days(30)), market("settled", 0.97, endDate=in_days(30)),
+        market("tomorrow", 0.5, endDate=in_days(1)), market("far", 0.5, endDate=in_days(200)),
+        market("undated", 0.5, endDate=None), market("second", 0.6, endDate=in_days(10)),
+    ]
+    with setting(tools, "fetch", lambda url, limit=0: ("application/json", json.dumps(busy))):
+        assert [row["id"] for row in tools.busiest_markets(5)] == ["polymarket-open", "polymarket-second"]
+        assert tools.busiest_markets(1)[0]["url"] == "https://polymarket.com/market/open"
+
+
+def test_market_lane_watches_the_list_and_tells_the_user_once_about_moves_and_levels():
+    mine, busy = {"id": "polymarket-a", "question": "A?"}, {"id": "polymarket-b", "question": "B?"}
+    listed = {"https://polymarket.com/market/a": [mine]}
+    os.environ["POLYMARKET_WATCH"] = "https://polymarket.com/market/a above=0.45 below=0.2  # mine\nhttps://polymarket.com/market/gone\n\n"
+    try:
+        with setting(tools, "polymarket", lambda url: listed[url]), setting(tools, "busiest_markets", lambda count: [mine, busy]):
+            watch = autopilot.market_watch()
+    finally:
+        del os.environ["POLYMARKET_WATCH"]
+    assert watch == [(mine, {"above": 0.45, "below": 0.2}), (busy, {})]  # the bad line was skipped, the rest kept
+
+    state, link, levels = {}, "[A?](https://polymarket.com/market/a)", {"above": 0.45, "below": 0.2}
+    assert autopilot.price_alerts(link, 0.30, levels, state) == ([], [])  # first sight: nothing to say yet
+    assert autopilot.price_alerts(link, 0.36, levels, state) == ([], [])  # a small move
+    moves, crossed = autopilot.price_alerts(link, 0.46, levels, state)
+    assert "from 30% to 46%" in moves[0] and "now above your level of 45%" in crossed[0]
+    assert autopilot.price_alerts(link, 0.47, levels, state) == ([], [])  # already told
+    moves, crossed = autopilot.price_alerts(link, 0.18, levels, state)
+    assert len(moves) == 1 and "now below your level of 20%" in crossed[0]
+
+    sent = []
+    with setting(autopilot.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["data"])) or FakeResponse()):
+        autopilot.notify(["- Price moved"])  # no topic set: nothing leaves
+        os.environ["NTFY_TOPIC"] = "topic-1"
+        try:
+            autopilot.notify(["- Price moved", "- Forecast"])
+            autopilot.notify([])  # nothing to say
+        finally:
+            del os.environ["NTFY_TOPIC"]
+    assert sent == [("https://ntfy.sh/topic-1", b"- Price moved\n- Forecast")]
+
 
 def test_series_facts_come_from_history_and_from_the_linked_symbol():
     start = datetime(2024, 1, 1).date()

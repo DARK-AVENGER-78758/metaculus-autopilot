@@ -118,6 +118,24 @@ def polymarket(url: str) -> list[dict]:
     else:
         events = json.loads(fetch(f"{GAMMA}/events?slug={quote(path[1])}")[1])
         markets = [market for event in events for market in event.get("markets") or []]
+    return sorted(_market_rows(markets, url), key=lambda row: -row["price"])
+
+
+def busiest_markets(count: int) -> list[dict]:
+    """The most traded open yes/no markets that are still undecided and close in 3 to 90 days."""
+    reply = fetch(f"{GAMMA}/markets?closed=false&active=true&order=volume24hr&ascending=false&limit=100", 8_000_000)[1]
+    now = datetime.now(timezone.utc)
+    rows = [
+        row
+        for row in _market_rows(json.loads(reply))
+        if 0.05 <= row["price"] <= 0.95
+        and row["market_info_close_datetime"]
+        and timedelta(days=3) <= datetime.fromisoformat(row["market_info_close_datetime"]) - now <= timedelta(days=90)
+    ]
+    return rows[:count]
+
+
+def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:
     rows = []
     for market in markets:
         # The API sends these two lists as JSON text inside the JSON.
@@ -127,16 +145,21 @@ def polymarket(url: str) -> list[dict]:
         )
         if market.get("closed") or [str(name).lower() for name in names] != ["yes", "no"] or len(prices) != 2:
             continue
+        try:
+            closes = datetime.fromisoformat((market.get("endDate") or "").replace("Z", "+00:00"))
+            closes = (closes if closes.tzinfo else closes.replace(tzinfo=timezone.utc)).isoformat()
+        except ValueError:
+            closes = ""
         rows.append({
             "id": f"polymarket-{market['slug']}",
             "question": market["question"],
-            "url": url,
+            "url": url or f"https://polymarket.com/market/{market['slug']}",
             "resolution_criteria": market.get("description") or "Resolves as the Polymarket market does.",
-            "market_info_close_datetime": (market.get("endDate") or "").replace("Z", "+00:00"),
+            "market_info_close_datetime": closes,
             "freeze_datetime": datetime.now(timezone.utc).isoformat(),
             "price": float(prices[0]),
         })
-    return sorted(rows, key=lambda row: -row["price"])
+    return rows
 
 
 class _Text(HTMLParser):

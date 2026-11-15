@@ -1,0 +1,76 @@
+name: Watch Polymarket markets
+
+# Watches Polymarket markets and tells you what changed. It forecasts a market when it is
+# new or when news breaks, and reports large price moves and price levels you set. It reads
+# public data only: the bot has no account there and places no bets. See AUTOPILOT.md.
+on:
+  workflow_dispatch:
+    inputs:
+      forecasts:
+        description: "Most forecasts to make in this run (each takes about ten minutes)"
+        default: "6"
+  schedule:
+    - cron: "17 */3 * * *" # every 3 hours
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: write # only for the keep-alive step at the end
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - name: Install dependencies
+        run: uv sync --locked
+      # Hooks, seen headlines, forecast times and last-told prices live in state/. It is a
+      # cache: if it is lost the bot rebuilds it, at the cost of one more forecast per market.
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: market-state-${{ github.run_id }}
+          restore-keys: market-state-
+      - name: Watch
+        run: uv run python autopilot.py --mode markets
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          # Both are secrets so they stay out of this public log. The watch list is one market
+          # link per line, optionally with levels: "<link> above=0.45 below=0.2".
+          POLYMARKET_WATCH: ${{ secrets.POLYMARKET_WATCH }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }} # where notifications go: https://ntfy.sh/<topic>
+          AUTO_MARKETS: ${{ vars.AUTO_MARKETS }} # busiest markets to watch unasked (default 6, 0 for none)
+          PRICE_MOVE: ${{ vars.PRICE_MOVE }} # a price change worth a notification (default 0.1)
+          MAX_FORECASTS_PER_RUN: ${{ inputs.forecasts || vars.MAX_FORECASTS_PER_RUN }}
+          FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
+          UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
+          FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
+      - name: Save bot state
+        if: always()
+        continue-on-error: true # losing the cache only costs a rebuild
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: market-state-${{ github.run_id }}
+      # GitHub switches off scheduled workflows after 60 days without repository activity.
+      # Re-enabling this one through the API resets that clock.
+      - name: Keep this schedule alive
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch_markets.yaml/enable"
