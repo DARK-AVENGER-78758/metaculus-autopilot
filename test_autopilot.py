@@ -609,9 +609,11 @@ def test_a_polymarket_link_becomes_open_yes_no_questions_with_the_market_price()
         market("open", 0.4, endDate=in_days(30)), market("settled", 0.97, endDate=in_days(30)),
         market("tomorrow", 0.5, endDate=in_days(1)), market("far", 0.5, endDate=in_days(200)),
         market("undated", 0.5, endDate=None), market("second", 0.6, endDate=in_days(10)),
+        market("bracket-50", 0.3, endDate=in_days(30), question="Will oil reach $50?"),
+        market("bracket-60", 0.2, endDate=in_days(30), question="Will oil reach $60?"),  # the same market, another number
     ]
     with setting(tools, "fetch", lambda url, limit=0: ("application/json", json.dumps(busy))):
-        assert [row["id"] for row in tools.busiest_markets(5)] == ["polymarket-open", "polymarket-second"]
+        assert [row["id"] for row in tools.busiest_markets(5)] == ["polymarket-open", "polymarket-second", "polymarket-bracket-50"]
         assert tools.busiest_markets(1)[0]["url"] == "https://polymarket.com/market/open"
 
 
@@ -635,15 +637,17 @@ def test_market_lane_watches_the_list_and_tells_the_user_once_about_moves_and_le
     moves, crossed = autopilot.price_alerts(link, 0.18, levels, state)
     assert len(moves) == 1 and "now below your level of 20%" in crossed[0]
 
-    sent = []
-    with setting(autopilot.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["data"])) or FakeResponse()):
-        autopilot.notify(["- Price moved"])  # no topic set: nothing leaves
-        os.environ["NTFY_TOPIC"] = "topic-1"
-        try:
+    sent, real_topic = [], os.environ.pop("NTFY_TOPIC", None)  # a topic in the local .env must not reach this check
+    try:
+        with setting(autopilot.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["data"])) or FakeResponse()):
+            autopilot.notify(["- Price moved"])  # no topic set: nothing leaves
+            os.environ["NTFY_TOPIC"] = "topic-1"
             autopilot.notify(["- Price moved", "- Forecast"])
             autopilot.notify([])  # nothing to say
-        finally:
-            del os.environ["NTFY_TOPIC"]
+    finally:
+        del os.environ["NTFY_TOPIC"]
+        if real_topic:
+            os.environ["NTFY_TOPIC"] = real_topic
     assert sent == [("https://ntfy.sh/topic-1", b"- Price moved\n- Forecast")]
 
 
@@ -835,7 +839,7 @@ def test_exam_keeps_resolved_market_questions_and_scores_them():
     rule = bench.choose_rule(sat, 0.9)
     assert rule["above"] == 0.75 and rule["skip"] == ["kind price"] and len(bench.answered(sat, rule)) == len(words)
     assert bench.choose_rule([row for row in sat if "stock" in row["question"]], 0.9) is None  # nothing reaches it
-    assert bench.family({"question": "Will oil be >98.99 on Nov 3? [Yes: $99 or above]"}) == bench.family({"question": "Will oil be >74.99 on Nov 3? [Yes: $75 or above]"})
+    assert tools.family({"question": "Will oil be >98.99 on Nov 3? [Yes: $99 or above]"}) == tools.family({"question": "Will oil be >74.99 on Nov 3? [Yes: $75 or above]"})
     with setting(bench, "BENCH", hooks.STATE_DIR):
         (hooks.STATE_DIR / "results-tuned.jsonl").write_text("\n".join(json.dumps(row) for row in sat), encoding="utf-8")
         text = bench.tune_text("tuned", 0.9)

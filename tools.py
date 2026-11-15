@@ -132,7 +132,13 @@ def busiest_markets(count: int) -> list[dict]:
         and row["market_info_close_datetime"]
         and timedelta(days=3) <= datetime.fromisoformat(row["market_info_close_datetime"]) - now <= timedelta(days=90)
     ]
-    return rows[:count]
+    busiest = {family(row): row for row in reversed(rows)}  # one market per family, or price brackets fill the list
+    return [row for row in rows if busiest[family(row)] is row][:count]
+
+
+def family(row: dict) -> str:
+    """The same for questions that differ only in a number or a named option, such as one market's price brackets."""
+    return re.sub(r"\[yes:.*|[\d.,$%]+", "", row["question"].lower()).strip()
 
 
 def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:

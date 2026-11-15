@@ -40,6 +40,7 @@ dotenv.load_dotenv()
 import autopilot
 import hooks
 import models
+import tools
 
 BENCH = Path("bench")  # downloads, replayed evidence and results; ignored by git
 DATASETS = "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets"
@@ -339,11 +340,6 @@ def labels(row: dict) -> set[str]:
     return {f"source {row['source']}", f"kind {kind(row['question'])}"}
 
 
-def family(row: dict) -> str:
-    """The same for questions that differ only in a number or a named option, such as one market's price brackets."""
-    return re.sub(r"\[yes:.*|[\d.,$%]+", "", row["question"].lower()).strip()
-
-
 def answered(rows: list[dict], rule: dict) -> list[dict]:
     return [row for row in confident(rows, rule["below"], rule["above"]) if not labels(row) & set(rule["skip"])]
 
@@ -395,7 +391,7 @@ def tune_text(label: str, target: float = 0.9) -> str:
     rows = results(label)
     halves: tuple[list, list] = ([], [])
     for row in rows:
-        halves[hashlib.sha256(family(row).encode()).digest()[0] % 2].append(row)
+        halves[hashlib.sha256(tools.family(row).encode()).digest()[0] % 2].append(row)
     lines = [
         f"\n### Tuning '{label}' to be right {target:.0%} of the time: {len(rows)} questions in two halves",
         "Each rule is chosen on one half and tested on the other, which had no part in choosing it.",
