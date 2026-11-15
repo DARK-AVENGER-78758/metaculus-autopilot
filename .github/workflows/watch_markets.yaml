@@ -8,7 +8,7 @@ on:
     inputs:
       forecasts:
         description: "Most forecasts to make in this run (each takes about ten minutes)"
-        default: "6"
+        default: "4"
   schedule:
     - cron: "17 */3 * * *" # every 3 hours
 
@@ -53,7 +53,7 @@ jobs:
           POLYMARKET_WATCH: ${{ secrets.POLYMARKET_WATCH }}
           AUTO_MARKETS: ${{ vars.AUTO_MARKETS }} # busiest markets to watch unasked (default 6, 0 for none)
           PRICE_MOVE: ${{ vars.PRICE_MOVE }} # a price change worth a notification (default 0.1)
-          MAX_FORECASTS_PER_RUN: ${{ inputs.forecasts || vars.MAX_FORECASTS_PER_RUN }}
+          MAX_FORECASTS_PER_RUN: ${{ inputs.forecasts || vars.MAX_FORECASTS_PER_RUN || 4 }} # four fit well inside the time limit
           FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
           UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
           REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
@@ -62,6 +62,7 @@ jobs:
       # one as an issue and GitHub notifies the owner. Nothing leaves GitHub, and nothing is
       # printed here. ALERTS_KEY is a deploy key that can push to that one repository only.
       - name: Send alerts
+        if: always() # a run that ends red has still made forecasts worth telling
         env:
           ALERTS_KEY: ${{ secrets.ALERTS_KEY }}
         run: |
