@@ -173,11 +173,13 @@ in batches (it resumes), then `uv run python bench.py report --label <name>`.
   discrete and date. One question takes 7 to 9 minutes, almost all of it waiting on the two
   slower models.
 - Eight calls sent at once took no longer than one, so NVIDIA is not throttling parallel calls.
+- The Test Bot workflow ran on GitHub's servers: the news feeds answered from there, two
+  practice forecasts were posted, and the run took 22 minutes. StepFun Step-5 timed out twice
+  in that run and was benched; the other models carried its share.
 
 ## Not yet verified
 
-- Yahoo Finance and the news feeds answer from a home connection. Whether they answer from
-  GitHub's servers is untested; a blocked source is skipped.
+- Yahoo Finance from GitHub's servers. A blocked source is skipped.
 - The Jev calls, written from TypeSafe's API reference.
 - The keep-alive step that stops GitHub disabling the schedule after 60 quiet days.
 
