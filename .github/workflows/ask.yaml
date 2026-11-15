@@ -1,0 +1,42 @@
+name: Ask the bot one question
+
+# Forecasts the question behind a link and writes the answer to this run's summary page.
+# It posts nothing anywhere. A Polymarket link is read from the site's public data only:
+# the bot has no account there and cannot place a bet. See AUTOPILOT.md.
+on:
+  workflow_dispatch:
+    inputs:
+      question:
+        description: "Link to a Polymarket market or a Metaculus question"
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  ask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Forecast
+        run: uv run python autopilot.py --dry-run --question "$QUESTION"
+        env:
+          QUESTION: ${{ inputs.question }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
+          FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
+          UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
+          FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}

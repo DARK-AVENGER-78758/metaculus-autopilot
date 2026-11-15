@@ -40,7 +40,6 @@ dotenv.load_dotenv()
 import autopilot
 import hooks
 import models
-from forecasting_tools import BinaryQuestion, QuestionState
 
 BENCH = Path("bench")  # downloads, replayed evidence and results; ignored by git
 DATASETS = "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets"
@@ -150,25 +149,6 @@ def exam(set_date: str = EXAM_SET) -> list[dict]:
     return sorted(rows, key=lambda row: hashlib.sha1(row["id"].encode()).hexdigest())
 
 
-def as_question(row: dict) -> BinaryQuestion:
-    number = int(hashlib.sha1(row["id"].encode()).hexdigest()[:9], 16)
-    present = lambda value: value if value not in (None, "", "N/A") else None  # noqa: E731
-    closes = present(row.get("market_info_close_datetime"))
-    return BinaryQuestion(
-        question_text=row["question"],
-        id_of_post=number,
-        id_of_question=number,
-        page_url=row["url"],
-        background_info=present(row.get("background")),
-        resolution_criteria=present(row.get("market_info_resolution_criteria")) or row["resolution_criteria"],
-        fine_print="",
-        open_time=datetime.fromisoformat(row["freeze_datetime"]),
-        scheduled_resolution_time=datetime.fromisoformat(closes) if closes else None,
-        state=QuestionState.OPEN,
-        already_forecasted=False,
-    )
-
-
 def results(label: str) -> list[dict]:
     path = BENCH / f"results-{label}.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
@@ -221,7 +201,7 @@ async def _sit_set(todo: list[dict], label: str, set_date: str) -> None:
     async def one(row: dict) -> None:
         async with slots:
             started = time.monotonic()
-            question = as_question(row)
+            question = autopilot.as_question(row)
             state = hooks.load_state(question.id_of_question)
             try:
                 await autopilot.gather(scout, question, state, autopilot.AS_OF)

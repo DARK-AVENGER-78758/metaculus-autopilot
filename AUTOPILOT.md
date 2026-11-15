@@ -98,6 +98,24 @@ The two scheduled workflows are switched off in this repository until the bot is
 to forecast live questions. To switch one on, remove the `# ` from the two `schedule` lines
 at the top of `run_bot_on_tournament.yaml` or `run_bot_on_metaculus_cup.yaml`.
 
+### Asking about a Polymarket market
+
+Actions → **Ask the bot one question** → Run workflow, and paste a Polymarket link (or a
+Metaculus one). The answer appears on the run's summary page as the bot's forecast against
+the market's price. The same thing from a terminal:
+`uv run python autopilot.py --question <Polymarket link>`.
+
+- **Read only.** The bot reads the market's question, rules and price from Polymarket's
+  public data. It has no account there, holds no money and cannot place a bet. Nothing is
+  posted anywhere, to Polymarket or to Metaculus.
+- **Where it runs.** GitHub's servers can reach that public data. Where an internet
+  provider blocks Polymarket, the terminal command times out, so use the workflow.
+- **The models never see the price.** It is shown beside the forecast, so the forecast is
+  the bot's own.
+- **Do not read a gap as an edge.** On resolved Polymarket questions in the exam, the
+  market's price was right more often than the bot. When the two disagree, the market is
+  the better bet.
+
 ### Optional extras
 
 | Secret or variable | What it adds |

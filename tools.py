@@ -16,6 +16,7 @@ import asyncio
 import csv
 import io
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -99,6 +100,43 @@ def fetch(url: str, limit: int = 1_500_000) -> tuple[str, str]:
         except LookupError:  # a charset name Python does not know
             return kind, body.decode("utf-8", errors="replace")
     raise ValueError(f"too many redirects: {url}")
+
+
+GAMMA = "https://gamma-api.polymarket.com"  # Polymarket's public market data: no account, read only
+
+
+def polymarket(url: str) -> list[dict]:
+    """The open yes/no markets behind a Polymarket link, likeliest first, as rows for autopilot.as_question.
+
+    This only reads what the site publishes. Nothing here can place a bet.
+    """
+    path = [part for part in urlparse(url).path.split("/") if part]
+    if len(path) < 2 or path[0] not in ("event", "market"):
+        raise ValueError(f"not a link to a Polymarket market: {url}")
+    if path[0] == "market" or len(path) > 2:  # one market of an event
+        markets = json.loads(fetch(f"{GAMMA}/markets?slug={quote(path[-1])}")[1])
+    else:
+        events = json.loads(fetch(f"{GAMMA}/events?slug={quote(path[1])}")[1])
+        markets = [market for event in events for market in event.get("markets") or []]
+    rows = []
+    for market in markets:
+        # The API sends these two lists as JSON text inside the JSON.
+        names, prices = (
+            value if isinstance(value, list) else json.loads(value or "[]")
+            for value in (market.get("outcomes"), market.get("outcomePrices"))
+        )
+        if market.get("closed") or [str(name).lower() for name in names] != ["yes", "no"] or len(prices) != 2:
+            continue
+        rows.append({
+            "id": f"polymarket-{market['slug']}",
+            "question": market["question"],
+            "url": url,
+            "resolution_criteria": market.get("description") or "Resolves as the Polymarket market does.",
+            "market_info_close_datetime": (market.get("endDate") or "").replace("Z", "+00:00"),
+            "freeze_datetime": datetime.now(timezone.utc).isoformat(),
+            "price": float(prices[0]),
+        })
+    return sorted(rows, key=lambda row: -row["price"])
 
 
 class _Text(HTMLParser):

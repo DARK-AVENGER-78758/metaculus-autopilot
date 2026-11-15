@@ -571,6 +571,39 @@ def test_clock_facts_and_question_links():
     ]
 
 
+def test_a_polymarket_link_becomes_open_yes_no_questions_with_the_market_price():
+    def market(slug, yes, **extra):
+        base = {
+            "slug": slug, "question": f"Will {slug} win?", "description": "Resolves Yes if they win.",
+            "endDate": "2026-12-31T12:00:00Z", "outcomes": '["Yes", "No"]', "outcomePrices": json.dumps([str(yes), str(1 - yes)]),
+        }
+        return {**base, **extra}
+
+    event = [{"slug": "the-race", "markets": [
+        market("rao", 0.2), market("iyer", 0.7), market("old", 0.5, closed=True),
+        market("teams", 0.5, outcomes='["Lions", "Tigers"]'),  # not a yes/no market
+    ]}]
+    asked = []
+
+    def fake_fetch(url):
+        asked.append(url)
+        return "application/json", json.dumps(event if "/events?" in url else event[0]["markets"][:1])
+
+    with setting(tools, "fetch", fake_fetch):
+        rows = tools.polymarket("https://polymarket.com/event/the-race?tid=1")
+        one = tools.polymarket("https://polymarket.com/event/the-race/rao")
+    assert [(row["question"], row["price"]) for row in rows] == [("Will iyer win?", 0.7), ("Will rao win?", 0.2)]
+    assert asked == [f"{tools.GAMMA}/events?slug=the-race", f"{tools.GAMMA}/markets?slug=rao"] and len(one) == 1
+    question = autopilot.as_question(rows[0])
+    assert question.community_prediction_at_access_time == 0.7 and question.resolution_criteria == "Resolves Yes if they win."
+    assert question.scheduled_resolution_time == datetime(2026, 12, 31, 12, tzinfo=timezone.utc)
+    try:
+        tools.polymarket("https://polymarket.com/profile/someone")
+        raise AssertionError("a link that is not a market was accepted")
+    except ValueError:
+        pass
+
+
 def test_series_facts_come_from_history_and_from_the_linked_symbol():
     start = datetime(2024, 1, 1).date()
     points = [(start + timedelta(days=n), 100 * 1.001**n) for n in range(1000)]  # grows 0.1% a day
@@ -726,10 +759,10 @@ def test_exam_keeps_resolved_market_questions_and_scores_them():
         bench._download = real_download
     assert sorted((row["id"], row["outcome"], row["crowd"]) for row in rows) == [("0xabc", 0, None), ("42", 1, 0.2)]
 
-    question = bench.as_question(rows[0])
+    question = autopilot.as_question(rows[0])
     assert question.resolution_criteria == "Resolves Yes if it happens." and question.background_info is None
     assert question.open_time == datetime(2026, 10, 9, tzinfo=timezone.utc)
-    assert question.id_of_question == bench.as_question(rows[0]).id_of_question  # the same id on every run
+    assert question.id_of_question == autopilot.as_question(rows[0]).id_of_question  # the same id on every run
 
     marked = [{"forecast": 0.9, "outcome": 1, "crowd": 0.8}] * 8 + [{"forecast": 0.7, "outcome": 0, "crowd": 0.2}] * 2
     result = bench.score(marked)

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -632,6 +633,27 @@ class Autopilot(FallTemplateBot2026):
         )
 
 
+def as_question(row: dict) -> BinaryQuestion:
+    """A yes/no question from outside Metaculus: an exam row (bench.py) or a market (tools.polymarket)."""
+    number = int(hashlib.sha1(row["id"].encode()).hexdigest()[:9], 16)
+    present = lambda value: value if value not in (None, "", "N/A") else None  # noqa: E731
+    closes = present(row.get("market_info_close_datetime"))
+    return BinaryQuestion(
+        question_text=row["question"],
+        id_of_post=number,
+        id_of_question=number,
+        page_url=row["url"],
+        background_info=present(row.get("background")),
+        resolution_criteria=present(row.get("market_info_resolution_criteria")) or row["resolution_criteria"],
+        fine_print="",
+        open_time=datetime.fromisoformat(row["freeze_datetime"]),
+        scheduled_resolution_time=datetime.fromisoformat(closes) if closes else None,
+        state=QuestionState.OPEN,
+        already_forecasted=False,
+        community_prediction_at_access_time=row.get("price"),  # shown beside the forecast, never to the models
+    )
+
+
 def questions_at(client: MetaculusClient, url: str) -> list[MetaculusQuestion]:
     """The questions behind a Metaculus URL: a question, a group's sub-questions, or a tournament's open questions."""
     tournament = re.search(r"/tournament/([^/\s]+)", url)
@@ -747,9 +769,11 @@ async def run(
                     state["history"] + [{"at": now.isoformat(), "why": reason, "prediction": prediction}]
                 )[-50:]
                 hooks.save_state(_key(question), state)
+            crowd = getattr(question, "community_prediction_at_access_time", None)
             summary.append(
                 f"- Forecast: {link} -> **{prediction}** "
-                f"({reason}; {len(state['hooks'])} hooks, {len(state['evidence'])} evidence items)"
+                + (f"against the market's {crowd:.0%} " if crowd is not None else "")
+                + f"({reason}; {len(state['hooks'])} hooks, {len(state['evidence'])} evidence items)"
             )
     return reports, summary
 
@@ -758,7 +782,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the autopilot forecasting bot")
     parser.add_argument("--mode", choices=["tournament", "watch", "test_questions"], default="tournament")
     parser.add_argument("--dry-run", action="store_true", help="forecast but do not post to Metaculus")
-    parser.add_argument("--question", nargs="+", metavar="URL", help="forecast just these Metaculus questions, now")
+    parser.add_argument(
+        "--question", nargs="+", metavar="URL",
+        help="forecast just these questions, now: Metaculus links, or Polymarket links (read only, nothing is posted)",
+    )
     args = parser.parse_args()
 
     sys.stdout.reconfigure(errors="replace")  # the banners use emoji, which a piped Windows console rejects
@@ -774,7 +801,8 @@ def main() -> None:
             "❌  NVIDIA_NIM_API_KEY is missing. Get a free key at https://build.nvidia.com "
             "(it starts with nvapi-) and put it in .env"
         )
-    publish = not args.dry_run
+    markets = [url for url in args.question or [] if "polymarket.com" in url]
+    publish = not args.dry_run and not markets  # a market has no Metaculus page to post to
     print_startup_banner(args.mode, will_publish=publish)
 
     bot = Autopilot(
@@ -787,7 +815,13 @@ def main() -> None:
     )
     if args.question:
         lane = "chosen questions"
-        questions = [found for url in args.question for found in questions_at(bot.metaculus_client, url)]
+        questions = [
+            found
+            for url in args.question
+            for found in (
+                map(as_question, tools.polymarket(url)) if url in markets else questions_at(bot.metaculus_client, url)
+            )
+        ]
         reports, summary = asyncio.run(run(bot, questions, one_shot=False, force=True))
     else:
         lane = f"{args.mode} lane"
