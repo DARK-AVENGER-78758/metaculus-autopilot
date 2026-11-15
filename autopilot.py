@@ -88,9 +88,6 @@ STALE_DAYS = 7  # update a watched question anyway after this long
 MAX_FORECASTS_PER_RUN = int(_env("MAX_FORECASTS_PER_RUN", "6"))  # about 8 minutes each; the rest wait for the next run
 # ponytail: one question at a time. The slower free models take twice as long, and start
 # timing out, when more than two of their calls run at once. Raise this if the roster gets faster.
-AUTO_MARKETS = int(_env("AUTO_MARKETS", "6"))  # market lane: how many of the busiest markets to watch unasked
-PRICE_MOVE = float(_env("PRICE_MOVE", "0.1"))  # market lane: a price change this large is worth telling the user
-ALERTS = Path("alerts.md")  # market lane: what to tell the user after this run; never committed or printed
 BATCH = 1  # questions forecast at the same time
 
 RELEVANCE_SCALE = [
@@ -475,9 +472,31 @@ async def gather(llm: GeneralLlm, question: MetaculusQuestion, state: dict, now:
     return material
 
 
+def _closes(question: MetaculusQuestion) -> datetime | None:
+    return question.close_time or question.scheduled_resolution_time
+
+
+def pace(question: MetaculusQuestion, now: datetime) -> tuple[float, float, float]:
+    """How closely to follow a question, from the time it has left.
+
+    Returns hours between looks at its news, hours between two forecasts, and hours after
+    which a forecast counts as stale. A question closing tomorrow is looked at every hour and
+    may be forecast again after 4 hours; one closing in months is looked at twice a day.
+    """
+    closes = _closes(question)
+    if not closes:
+        return 3.0, COOLDOWN_HOURS, STALE_DAYS * 24
+    left = max(0.0, (closes - now).total_seconds() / 3600)
+    return (
+        max(1.0, min(12.0, left / 24)),
+        max(2.0, min(COOLDOWN_HOURS, left / 6)),
+        max(6.0, min(STALE_DAYS * 24, left / 3)),
+    )
+
+
 def decide(
     *, one_shot: bool, already_forecasted: bool, last_forecast_at: datetime | None,
-    pending: list[str], now: datetime,
+    pending: list[str], now: datetime, cooldown_hours: float = COOLDOWN_HOURS, stale_hours: float = STALE_DAYS * 24,
 ) -> str | None:
     """Why this question should be forecast now, or None to leave it alone."""
     if not already_forecasted and last_forecast_at is None:
@@ -485,9 +504,9 @@ def decide(
     if one_shot:
         return None  # bot tournaments allow one forecast per question
     hours = (now - last_forecast_at).total_seconds() / 3600 if last_forecast_at else float("inf")
-    if pending and hours >= COOLDOWN_HOURS:
+    if pending and hours >= cooldown_hours:
         return f"news: {pending[-1]}"
-    if hours >= STALE_DAYS * 24:
+    if hours >= stale_hours:
         return "forecast went stale"
     return None
 
@@ -708,17 +727,22 @@ async def run(
 
     # Pick what to look at, soonest-closing first, so nothing is lost to a 3-hour window.
     candidates: list[tuple[MetaculusQuestion, dict, datetime | None]] = []
-    new_questions = 0
-    for question in sorted(questions, key=lambda q: q.close_time or far_future):
+    new_questions = resting = 0
+    for question in sorted(questions, key=lambda q: _closes(q) or far_future):
         state = hooks.load_state(_key(question))
         last = datetime.fromisoformat(state["last_forecast_at"]) if state["last_forecast_at"] else None
         untouched = not question.already_forecasted and last is None
         link = f"[{question.question_text}]({question.page_url})"
-        if question.close_time and (question.close_time - now).total_seconds() < MIN_MINUTES_LEFT * 60:
+        if _closes(question) and (_closes(question) - now).total_seconds() < MIN_MINUTES_LEFT * 60:
             summary.append(f"- Skipped, closes in under {MIN_MINUTES_LEFT} minutes: {link}")
             continue
         if not force and one_shot and not untouched:
             continue  # already forecast in a one-shot lane: no polling needed
+        looked = datetime.fromisoformat(state["looked_at"]) if state.get("looked_at") else None
+        # 90% of the gap, so a run that starts a few minutes early still counts.
+        if not force and not untouched and looked and (now - looked).total_seconds() < 0.9 * 3600 * pace(question, now)[0]:
+            resting += 1
+            continue
         if untouched or force:  # these will be forecast, so they count against this run's budget
             new_questions += 1
             if new_questions > MAX_FORECASTS_PER_RUN:
@@ -741,9 +765,11 @@ async def run(
     todo: list[tuple[MetaculusQuestion, dict, str]] = []
     for (question, state, last), material in zip(candidates, found):
         state["pending"] += [item["title"] for item in material]
+        state["looked_at"] = now.isoformat()
+        _, cooldown, stale = pace(question, now)
         reason = "test run" if force else decide(
             one_shot=one_shot, already_forecasted=bool(question.already_forecasted),
-            last_forecast_at=last, pending=state["pending"], now=now,
+            last_forecast_at=last, pending=state["pending"], now=now, cooldown_hours=cooldown, stale_hours=stale,
         )
         if reason and len(todo) < MAX_FORECASTS_PER_RUN:
             state["fast_read"] = await asyncio.to_thread(fast_read, question, hooks.digest(state["evidence"]))
@@ -780,76 +806,14 @@ async def run(
                 + (f"against the market's {crowd:.0%} " if crowd is not None else "")
                 + f"({reason}; {len(state['hooks'])} hooks, {len(state['evidence'])} evidence items)"
             )
+    if resting:
+        summary.append(f"- Not due for a look yet: {resting} (the sooner a question closes, the more often it is checked)")
     return reports, summary
-
-
-def market_watch() -> list[tuple[dict, dict]]:
-    """Each market to watch with the price levels the user set for it: their list first, then the busiest markets.
-
-    POLYMARKET_WATCH holds one market link per line, optionally followed by levels to be told
-    about, as in `https://polymarket.com/market/some-market above=0.45 below=0.2`.
-    """
-    watch: dict[str, tuple[dict, dict]] = {}
-    for line in os.getenv("POLYMARKET_WATCH", "").splitlines():
-        parts = line.split("#")[0].split()
-        if not parts:
-            continue
-        try:  # one bad line must not stop the other markets
-            levels = {side: float(level) for side, level in (part.split("=") for part in parts[1:])}
-            for row in tools.polymarket(parts[0]):
-                watch[row["id"]] = (row, {side: level for side, level in levels.items() if side in ("above", "below")})
-        except Exception as error:
-            logger.warning(f"Skipping a line of the market watch list: {type(error).__name__}")  # the list is private
-    for row in tools.busiest_markets(AUTO_MARKETS) if AUTO_MARKETS else []:
-        watch.setdefault(row["id"], (row, {}))
-    return list(watch.values())
-
-
-def price_alerts(link: str, price: float, levels: dict[str, float], state: dict) -> tuple[list[str], list[str]]:
-    """What the price has done since the user was last told: (large moves, levels of theirs it crossed).
-
-    The two are kept apart because a run's page is public and the user's levels are not.
-    """
-    told = state.get("price_told")
-    past = lambda value, side, level: value is not None and (value >= level if side == "above" else value <= level)  # noqa: E731
-    crossed = [
-        f"- Price {price:.0%} is now {side} your level of {level:.0%}: {link}"
-        for side, level in levels.items()
-        if past(price, side, level) and not past(told, side, level)
-    ]
-    moves = [f"- Price moved from {told:.0%} to {price:.0%}: {link}"] if told is not None and abs(price - told) >= PRICE_MOVE else []
-    if told is None or crossed or moves:
-        state["price_told"] = price
-    return moves, crossed
-
-
-def watch_markets(bot: Autopilot, tell: bool) -> tuple[list[MetaculusQuestion], list, list[str]]:
-    """The market lane: forecast watched markets when they are new or news breaks, and tell the user. No bets.
-
-    What to tell the user is written to ALERTS. The workflow files that as an issue in the
-    owner's private alerts repository, and GitHub notifies them. Nothing leaves GitHub.
-    """
-    ALERTS.unlink(missing_ok=True)
-    watch = market_watch()
-    questions = [as_question(row) for row, _ in watch]
-    reports, summary = asyncio.run(run(bot, questions, one_shot=False, record=tell))
-    private: list[str] = []
-    for (row, levels), question in zip(watch, questions):
-        state = hooks.load_state(_key(question))
-        moves, crossed = price_alerts(f"[{row['question']}]({row['url']})", row["price"], levels, state)
-        if tell:
-            hooks.save_state(_key(question), state)
-        summary += moves
-        private += crossed
-    alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private
-    if tell and alerts:
-        ALERTS.write_text("\n".join(alerts) + "\n", encoding="utf-8")
-    return questions, reports, summary
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the autopilot forecasting bot")
-    parser.add_argument("--mode", choices=["tournament", "watch", "test_questions", "markets"], default="tournament")
+    parser.add_argument("--mode", choices=["tournament", "watch", "test_questions"], default="tournament")
     parser.add_argument("--dry-run", action="store_true", help="forecast but do not post to Metaculus")
     parser.add_argument(
         "--question", nargs="+", metavar="URL",
@@ -871,7 +835,7 @@ def main() -> None:
             "(it starts with nvapi-) and put it in .env"
         )
     markets = [url for url in args.question or [] if "polymarket.com" in url]
-    publish = not args.dry_run and not markets and args.mode != "markets"  # a market has no Metaculus page to post to
+    publish = not args.dry_run and not markets  # a market has no Metaculus page to post to
     print_startup_banner(args.mode, will_publish=publish)
 
     bot = Autopilot(
@@ -892,9 +856,6 @@ def main() -> None:
             )
         ]
         reports, summary = asyncio.run(run(bot, questions, one_shot=False, force=True))
-    elif args.mode == "markets":
-        lane = "market watch"
-        questions, reports, summary = watch_markets(bot, tell=not args.dry_run)
     else:
         lane = f"{args.mode} lane"
         questions = load_questions(args.mode, bot.metaculus_client)
@@ -902,6 +863,13 @@ def main() -> None:
             run(bot, questions, one_shot=args.mode == "tournament", force=args.mode == "test_questions")
         )
 
+    finish(bot, lane, questions, summary)
+    print_run_summary_banner(reports, will_publish=publish)
+    bot.log_report_summary(reports)  # raises if any forecast failed, which turns the Actions run red
+
+
+def finish(bot: Autopilot, lane: str, questions: list, summary: list[str]) -> None:
+    """Print the run's summary, put it on the Actions page, and fail the run if too few models are left."""
     forecasters = bot.get_llm("default", "llm")
     used = dict.fromkeys(pool for pool in (forecasters, bot.get_llm("scout", "llm")) if isinstance(pool, models.Pool))
     text = "\n".join(
@@ -913,11 +881,9 @@ def main() -> None:
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as page:
             page.write(text + "\n")
-    print_run_summary_banner(reports, will_publish=publish)
     if isinstance(forecasters, models.Pool) and len(forecasters.healthy()) < 2:
         # One family left is no ensemble. Fail the run so the roster gets fixed.
         sys.exit(f"❌  Fewer than two forecasting models are still available: {forecasters.dead}")
-    bot.log_report_summary(reports)  # raises if any forecast failed, which turns the Actions run red
 
 
 if __name__ == "__main__":

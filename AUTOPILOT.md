@@ -116,39 +116,61 @@ the market's price. The same thing from a terminal:
   market's price was right more often than the bot. When the two disagree, the market is
   the better bet.
 
-### Watching Polymarket markets
+### Watching Polymarket markets (`markets.py`)
 
-The **Watch Polymarket markets** workflow runs every 3 hours and needs nobody at the
-keyboard. It places no bets: it watches, forecasts and tells you.
+The **Watch Polymarket markets** workflow runs every hour with nobody at the keyboard. It
+places no bets: it watches, forecasts, keeps score and tells you what it would do.
 
 | Step | What happens |
 |---|---|
-| Pick markets | Your own list, plus the 6 most traded open yes/no markets that are still undecided (price between 5% and 95%) and close in 3 to 90 days |
+| Pick markets | Your own list, the 6 most traded undecided markets closing in 3 to 90 days, and the 6 most traded closing within 3 days. One market per family, so one event's price brackets do not fill the list |
 | Set hooks | For each market the scout writes news and social searches, as for any question |
-| Trigger on changes | A new market is forecast once. After that it is forecast again only when material news arrives (at most every 12 hours) or after 7 days |
-| Tell you | Each forecast (bot against market price, and the headline that triggered it), any price move of 10 points or more, and any price level you set being crossed |
+| Pace by end time | The sooner a market closes, the closer it is followed (table below) |
+| Forecast | A new market is forecast once, then again when material news arrives or the forecast goes stale |
+| Guide you | For each bet you list: cash out, cut the loss, or hold |
+| Keep score | Every forecast is logged with the market price at the time. When the market resolves, the bot and the price are both graded |
 
-Settings, in Settings → Secrets and variables → Actions:
+How closely a market is followed:
 
-| Name | Kind | What it does |
-|---|---|---|
-| `ALERTS_KEY` | Secret | A key that can push to your private `market-alerts` repository and nothing else. Already set |
-| `POLYMARKET_WATCH` | Secret | Your markets, one link per line. Add levels to be told about: `<link> above=0.45 below=0.2`. It is a secret because this repository's run pages are public |
-| `AUTO_MARKETS` | Variable | How many of the busiest markets to watch unasked. Default 6; 0 watches only your list |
-| `PRICE_MOVE` | Variable | The price change worth a notification. Default 0.1 (10 points) |
+| Time left | News checked | Can be forecast again after | Forecast is stale after |
+|---|---|---|---|
+| 1 day | every hour | 4 hours | 8 hours |
+| 3 days | every 3 hours | 12 hours | 1 day |
+| 12 days or more | every 12 hours | 12 hours | 4 to 7 days |
 
-**How alerts reach you.** Everything stays inside your own GitHub account. The run pushes
-its alerts to your private `market-alerts` repository, a small workflow there files them
-as an issue that mentions you, and GitHub sends the notification: an email, and a push on
-your phone if the GitHub app is installed. No outside service is involved. Forecasts and
-price moves are also on each run's public summary page; levels you set appear only in
-the private issue.
+Prices are checked on every run whatever the pace.
+
+**Your private repository `market-alerts`** holds everything personal. This repository is
+public, so none of it is written or printed here.
+
+| File | What it is |
+|---|---|
+| `watch.txt` | Your markets and bets. Edit it on GitHub. A bet is a link, your side, and the price paid: `<link> yes bought=0.32 target=0.45 stop=0.25` |
+| `scorecard.md` | The bot's record on watched markets that have resolved, next to the market price's record, with paper-bet results |
+| `ledger.jsonl` | Every forecast, the price at the time, and the outcome once known |
+| `alerts/` | What the bot had to tell you. A workflow there files each as an issue that mentions you, so GitHub notifies you |
+
+**What the guidance says, and on what basis.** For a bet you hold:
+
+1. Your target is reached: "Cash out".
+2. Your stop is hit: "Cut the loss".
+3. Otherwise the bot compares its forecast with the price. If it rates your side 10 points
+   or more below the price, it says "Consider cashing out" when you are ahead and
+   "Consider cutting the loss" when you are behind. Otherwise "Hold".
+
+You are told when the advice changes, not every hour. Every alert ends with the bot's live
+record against the market price, so you can see how much weight its view deserves. It does
+not suggest opening new bets or switching sides: on past questions that lost money.
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a
 paper test on 100 resolved Polymarket and Kalshi questions, staking one unit on the bot's
 side wherever it differed from the market price by 5 points or more made 70 bets, won 16,
 and lost 54% of the money staked. Larger gaps did worse, not better.
+
+Settings (Settings → Secrets and variables → Actions): the secret `ALERTS_KEY` lets a run
+reach `market-alerts` and nothing else. The variables `AUTO_MARKETS`, `NEAR_MARKETS` (both
+default 6, 0 for none) and `PRICE_MOVE` (default 0.1) are optional.
 
 ### Optional extras
 

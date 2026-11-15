@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import autopilot
 import bench
 import hooks
+import markets
 import models
 import tools
 from forecasting_tools import (
@@ -615,44 +616,88 @@ def test_a_polymarket_link_becomes_open_yes_no_questions_with_the_market_price()
     with setting(tools, "fetch", lambda url, limit=0: ("application/json", json.dumps(busy))):
         assert [row["id"] for row in tools.busiest_markets(5)] == ["polymarket-open", "polymarket-second", "polymarket-bracket-50"]
         assert tools.busiest_markets(1)[0]["url"] == "https://polymarket.com/market/open"
+        assert [row["id"] for row in tools.busiest_markets(5, 0.5, 3)] == ["polymarket-tomorrow"] and tools.busiest_markets(0) == []
+    settled = lambda yes: lambda url: ("application/json", json.dumps([market("done", yes, closed=True)]))  # noqa: E731
+    for yes, known in ((1, 1), (0, 0), (0.6, None)):
+        with setting(tools, "fetch", settled(yes)):
+            assert tools.polymarket_outcome("done") == known
+    with setting(tools, "fetch", lambda url: ("application/json", json.dumps([market("open", 1.0)]))):
+        assert tools.polymarket_outcome("open") is None  # a price of 100% is not an outcome until the market has closed
 
 
-def test_market_lane_watches_the_list_and_tells_the_user_once_about_moves_and_levels():
-    mine, busy = {"id": "polymarket-a", "question": "A?"}, {"id": "polymarket-b", "question": "B?"}
-    listed = {"https://polymarket.com/market/a": [mine]}
-    os.environ["POLYMARKET_WATCH"] = "https://polymarket.com/market/a above=0.45 below=0.2  # mine\nhttps://polymarket.com/market/gone\n\n"
-    try:
-        with setting(tools, "polymarket", lambda url: listed[url]), setting(tools, "busiest_markets", lambda count: [mine, busy]):
-            watch = autopilot.market_watch()
-    finally:
-        del os.environ["POLYMARKET_WATCH"]
-    assert watch == [(mine, {"above": 0.45, "below": 0.2}), (busy, {})]  # the bad line was skipped, the rest kept
+def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_private():
+    entries, problems = markets.read_watch(
+        "# my markets\nhttps://polymarket.com/market/a yes bought=32 target=45% stop=0.25\n\n"
+        "https://polymarket.com/market/b\nhttps://polymarket.com/market/c no bought=0.4 sell=0.9\n"
+        "https://polymarket.com/market/d target=0.6\n"
+    )
+    assert entries == [
+        ("https://polymarket.com/market/a", {"side": "yes", "bought": 0.32, "target": 0.45, "stop": 0.25}),
+        ("https://polymarket.com/market/b", {}), ("https://polymarket.com/market/c", {}), ("https://polymarket.com/market/d", {}),
+    ]
+    assert len(problems) == 2 and "Line 5" in problems[0] and "'sell=0.9'" in problems[0] and "Line 6" in problems[1]
 
-    state, link, levels = {}, "[A?](https://polymarket.com/market/a)", {"above": 0.45, "below": 0.2}
-    assert autopilot.price_alerts(link, 0.30, levels, state) == ([], [])  # first sight: nothing to say yet
-    assert autopilot.price_alerts(link, 0.36, levels, state) == ([], [])  # a small move
-    moves, crossed = autopilot.price_alerts(link, 0.46, levels, state)
-    assert "from 30% to 46%" in moves[0] and "now above your level of 45%" in crossed[0]
-    assert autopilot.price_alerts(link, 0.47, levels, state) == ([], [])  # already told
-    moves, crossed = autopilot.price_alerts(link, 0.18, levels, state)
-    assert len(moves) == 1 and "now below your level of 20%" in crossed[0]
+    bet = {"side": "yes", "bought": 0.32, "target": 0.45, "stop": 0.25}
+    assert markets.guidance(bet, 0.46, 0.9)[0] == "target" and "(+44%)" in markets.guidance(bet, 0.46, 0.9)[1]
+    assert markets.guidance(bet, 0.24, 0.9)[0] == "stop"  # the owner's own limits come before the bot's view
+    assert markets.guidance(bet, 0.40, 0.25) == ("cash out", "Consider cashing out: your Yes bet bought at 32% is now 40% (+25%), and the bot gives your side 25%, below the price")
+    assert markets.guidance(bet, 0.30, 0.15)[0] == "cut" and markets.guidance(bet, 0.30, None)[0] == "hold"
+    assert "above the price" in markets.guidance(bet, 0.40, 0.6)[1] and "close to the price" in markets.guidance(bet, 0.40, 0.45)[1]
+    held_no = {"side": "no", "bought": 0.4}  # a No bet gains when the Yes price falls
+    assert "is now 70% (+75%)" in markets.guidance(held_no, 0.30, 0.3)[1] and markets.guidance(held_no, 0.30, 0.6)[0] == "cash out"
 
-    # A whole run: the forecast and the crossed level go to the alerts file, and the level stays off the public page.
+    state, link = {}, "[A?](https://polymarket.com/market/a)"
+    assert markets.price_move(link, 0.30, state) == [] and markets.price_move(link, 0.36, state) == []  # first sight, then a small move
+    assert "from 30% to 46%" in markets.price_move(link, 0.46, state)[0] and markets.price_move(link, 0.47, state) == []
+
+    # A whole run, then a second one after the market resolves.
     row = {
         "id": "polymarket-a", "question": "Will A happen?", "url": "https://polymarket.com/market/a",
         "resolution_criteria": "Resolves Yes if A happens.", "market_info_close_datetime": (NOW + timedelta(days=30)).isoformat(),
         "freeze_datetime": NOW.isoformat(), "price": 0.5,
     }
-    alerts = hooks.STATE_DIR / "alerts.md"
-    alerts.write_text("left over from an earlier run", encoding="utf-8")
-    with setting(autopilot, "market_watch", lambda: [(row, {"above": 0.45})]), setting(autopilot, "ALERTS", alerts):
-        with setting(hooks, "poll", lambda hook_list, days, until=None: [item("A is confirmed")]):
-            questions, reports, summary = autopilot.watch_markets(make_bot(), tell=True)
-            told = alerts.read_text(encoding="utf-8")
-            again = autopilot.watch_markets(make_bot(), tell=True)[2]
-    assert "- Forecast: [Will A happen?]" in told and "against the market's 50%" in told and "left over" not in told
-    assert "now above your level of 45%" in told and "your level" not in "\n".join(summary)
-    assert not alerts.exists() and not any(line.startswith("- Forecast") for line in again)  # nothing new: nothing to tell
+    private = hooks.STATE_DIR / "private"
+    private.mkdir()
+    (private / "watch.txt").write_text("https://polymarket.com/market/a yes bought=0.32 target=0.45\nhttps://polymarket.com/market/gone\n", encoding="utf-8")
+    listed = {"https://polymarket.com/market/a": [row]}
+    outcome = [None]
+    with setting(markets, "PRIVATE", private), setting(tools, "polymarket", lambda url: listed[url]):
+        with setting(tools, "busiest_markets", lambda count, soonest, latest: []), setting(tools, "polymarket_outcome", lambda slug: outcome[0]):
+            with setting(hooks, "poll", lambda hook_list, days, until=None: [item("A is confirmed")]):
+                questions, summary = markets.watch(make_bot(), tell=True)
+                first_alert = "".join(path.read_text(encoding="utf-8") for path in (private / "alerts").iterdir())
+                outcome[0] = 1
+                time.sleep(1.1)  # alert files are named by the second
+                markets.watch(make_bot(), tell=True)
+    ledger = [json.loads(line) for line in (private / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [entry.get("forecast", entry.get("outcome")) for entry in ledger] == [0.7, 1] and ledger[0]["price"] == 0.5
+    assert "- Forecast: [Will A happen?]" in first_alert and "Cash out: your Yes bet bought at 32% is now 50% (+56%), at your target of 45%" in first_alert
+    assert markets.UNTESTED in first_alert and "bet" not in "\n".join(summary)  # the public page never shows a bet
+    alerts = sorted((private / "alerts").iterdir())
+    assert len(alerts) == 2 and "Resolved Yes" in alerts[1].read_text(encoding="utf-8") and "bot right 100%" in alerts[1].read_text(encoding="utf-8")
+    card = (private / "scorecard.md").read_text(encoding="utf-8")
+    assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
+
+
+def test_a_question_is_followed_more_closely_as_its_end_nears():
+    soon, later, open_ended = (make_question(close_time=NOW + gap) if gap else make_question() for gap in (timedelta(hours=24), timedelta(days=60), None))
+    assert autopilot.pace(soon, NOW) == (1.0, 4.0, 8.0)  # look hourly, forecast again after 4 hours, stale after 8
+    assert autopilot.pace(later, NOW) == (12.0, 12.0, 168.0) and autopilot.pace(open_ended, NOW) == (3.0, 12, 168)
+    last = NOW - timedelta(hours=5)
+    held = dict(one_shot=False, already_forecasted=True, last_forecast_at=last, pending=["Rao resigns"], now=NOW)
+    assert autopilot.decide(**held) is None and autopilot.decide(**held, cooldown_hours=4) == "news: Rao resigns"
+
+    # A question looked at an hour ago is left alone when it closes in months, and looked at again when it closes tomorrow.
+    polled = []
+    for number, question in ((31, later), (32, soon)):
+        question.id_of_question = number
+        state = hooks.load_state(number)
+        state.update(last_forecast_at=(NOW - timedelta(hours=1)).isoformat(), looked_at=(NOW - timedelta(hours=1)).isoformat())
+        hooks.save_state(number, state)
+    with setting(hooks, "poll", lambda hook_list, days, until=None: polled.append(1) or []):
+        _, summary = asyncio.run(autopilot.run(make_bot(), [later, soon], one_shot=False))
+    assert len(polled) >= 1 and any("Not due for a look yet: 1" in line for line in summary)
+    assert any("No change" in line for line in summary)  # the one closing tomorrow was looked at
 
 
 def test_series_facts_come_from_history_and_from_the_linked_symbol():
@@ -1037,7 +1082,8 @@ def test_run_end_to_end_in_both_lanes():
         assert reports == [] and len(polls) == 2 and published == [0.7]
 
         # Watch lane, 13 hours later, a decisive new headline arrives: the forecast is updated.
-        state["last_forecast_at"] = (NOW - timedelta(hours=13)).isoformat()
+        long_ago = (NOW - timedelta(hours=13)).isoformat()
+        state.update(last_forecast_at=long_ago, looked_at=long_ago)
         hooks.save_state(202, state)
         hooks.poll = lambda hook_list, days, until=None: [item("Rao wins confidence vote")]
         watched = make_question(already_forecasted=True)
@@ -1045,8 +1091,15 @@ def test_run_end_to_end_in_both_lanes():
         state = hooks.load_state(202)
         assert published == [0.7, 0.7] and state["history"][-1]["why"] == "news: Rao wins confidence vote"
 
-        # Watch lane, right after that update, more news: held back by the cooldown but not lost.
+        # Watch lane, right after that update: the question is not due for another look yet.
         hooks.poll = lambda hook_list, days, until=None: [item("President invites Rao to form government")]
+        reports, summary = asyncio.run(autopilot.run(make_bot(publish=True), [watched], one_shot=False))
+        assert reports == [] and "Not due for a look yet: 1" in summary[0] and hooks.load_state(202)["pending"] == []
+
+        # Four hours on it is looked at again, and more news has come: held back by the cooldown but not lost.
+        state = hooks.load_state(202)
+        state["looked_at"] = (NOW - timedelta(hours=4)).isoformat()
+        hooks.save_state(202, state)
         reports, summary = asyncio.run(autopilot.run(make_bot(publish=True), [watched], one_shot=False))
         assert reports == [] and "No change" in summary[0]
         assert hooks.load_state(202)["pending"] == ["President invites Rao to form government"]

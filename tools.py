@@ -121,16 +121,23 @@ def polymarket(url: str) -> list[dict]:
     return sorted(_market_rows(markets, url), key=lambda row: -row["price"])
 
 
-def busiest_markets(count: int) -> list[dict]:
-    """The most traded open yes/no markets that are still undecided and close in 3 to 90 days."""
-    reply = fetch(f"{GAMMA}/markets?closed=false&active=true&order=volume24hr&ascending=false&limit=100", 8_000_000)[1]
+def busiest_markets(count: int, soonest_days: float = 3, latest_days: float = 90) -> list[dict]:
+    """The most traded open yes/no markets that are still undecided and close within the given days from now."""
+    if not count:
+        return []
     now = datetime.now(timezone.utc)
+    soonest, latest = now + timedelta(days=soonest_days), now + timedelta(days=latest_days)
+    listing = f"{GAMMA}/markets?closed=false&active=true&order=volume24hr&ascending=false&limit=100"
+    try:
+        reply = fetch(f"{listing}&end_date_min={soonest:%Y-%m-%dT%H:%M:%SZ}&end_date_max={latest:%Y-%m-%dT%H:%M:%SZ}", 8_000_000)[1]
+    except requests.RequestException:  # the date filter only narrows the listing; the check below is what counts
+        reply = fetch(listing, 8_000_000)[1]
     rows = [
         row
         for row in _market_rows(json.loads(reply))
         if 0.05 <= row["price"] <= 0.95
         and row["market_info_close_datetime"]
-        and timedelta(days=3) <= datetime.fromisoformat(row["market_info_close_datetime"]) - now <= timedelta(days=90)
+        and soonest <= datetime.fromisoformat(row["market_info_close_datetime"]) <= latest
     ]
     busiest = {family(row): row for row in reversed(rows)}  # one market per family, or price brackets fill the list
     return [row for row in rows if busiest[family(row)] is row][:count]
@@ -141,14 +148,24 @@ def family(row: dict) -> str:
     return re.sub(r"\[yes:.*|[\d.,$%]+", "", row["question"].lower()).strip()
 
 
+def polymarket_outcome(slug: str) -> int | None:
+    """1 or 0 once the yes/no market with this slug has resolved, else None."""
+    for market in json.loads(fetch(f"{GAMMA}/markets?slug={quote(slug)}&closed=true")[1]):
+        prices = _listed(market.get("outcomePrices"))
+        if market.get("closed") and len(prices) == 2:
+            return 1 if float(prices[0]) >= 0.99 else 0 if float(prices[0]) <= 0.01 else None
+    return None
+
+
+def _listed(value) -> list:
+    """The API sends some lists as JSON text inside the JSON."""
+    return value if isinstance(value, list) else json.loads(value or "[]")
+
+
 def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:
     rows = []
     for market in markets:
-        # The API sends these two lists as JSON text inside the JSON.
-        names, prices = (
-            value if isinstance(value, list) else json.loads(value or "[]")
-            for value in (market.get("outcomes"), market.get("outcomePrices"))
-        )
+        names, prices = _listed(market.get("outcomes")), _listed(market.get("outcomePrices"))
         if market.get("closed") or [str(name).lower() for name in names] != ["yes", "no"] or len(prices) != 2:
             continue
         try:

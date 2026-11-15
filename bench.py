@@ -47,6 +47,7 @@ DATASETS = "https://raw.githubusercontent.com/forecastingresearch/forecastbench-
 EXAM_SET = "2026-10-11"  # the set the confidence cut-off was chosen on
 EXAM_SINCE = "2026-06-21"  # the first set frozen after the exam model (Nemotron 3 Ultra, June 2026) was released
 MARKET_SOURCES = ("metaculus", "polymarket", "kalshi", "manifold", "infer")  # "will X happen" questions
+BETTABLE = ("polymarket", "kalshi")  # the sources whose crowd figure is a price someone could have bet at
 PARALLEL = int(os.getenv("EXAM_PARALLEL") or 3)  # exam questions sat at the same time
 # The bot answers only when its own forecast is outside this middle band. Inside it, the bot
 # did no better than saying 50% (Brier 0.265 against 0.250 on the first 90 questions).
@@ -255,6 +256,23 @@ def score(rows: list[dict], key: str = "forecast") -> dict:
     }
 
 
+def paper(rows: list[dict], margin: float = 0.05) -> dict:
+    """Paper bets: one unit on the bot's side of every market whose price differed from its forecast by `margin` or more.
+
+    Only real-money markets count. Prices are taken as given, with no fees or spread, so
+    real returns would be a little worse.
+    """
+    bets = won = 0
+    profit = 0.0
+    for row in rows:
+        price, forecast = row.get("crowd"), row["forecast"]
+        if row.get("source") not in BETTABLE or price is None or not 0.02 <= price <= 0.98 or abs(forecast - price) < margin:
+            continue
+        gain = row["outcome"] / price - 1 if forecast > price else (1 - row["outcome"]) / (1 - price) - 1
+        bets, won, profit = bets + 1, won + (gain > 0), profit + gain
+    return {"bets": bets, "won": won, "profit": profit, "return": profit / bets if bets else 0.0}
+
+
 def confident(rows: list[dict], below: float = CONFIDENT_BELOW, above: float = CONFIDENT_ABOVE) -> list[dict]:
     """The questions the bot would answer: its own forecast is outside the coin-flip band."""
     return [row for row in rows if row["forecast"] <= below or row["forecast"] >= above]
@@ -304,6 +322,14 @@ def report_text(label: str, sets: list[str] | None = None) -> str:
             lines.append(
                 f"- {name}: {every['accuracy']:.0%} on {every['questions']}; "
                 f"confident {sure_part['accuracy']:.0%} on {sure_part['questions']}"
+            )
+    lines.append("\nPaper bets against the market price (one unit on the bot's side; Polymarket and Kalshi questions):")
+    for margin in (0.05, 0.1, 0.2, 0.3):
+        bets = paper(rows, margin)
+        if bets["bets"]:
+            lines.append(
+                f"- when the bot differed by {margin:.0%} or more: {bets['bets']} bets, {bets['won']} won, "
+                f"{bets['return']:+.0%} on the money staked"
             )
     misses = sorted(rows, key=lambda row: -abs(row["forecast"] - row["outcome"]))[:6]
     lines.append("\nLargest misses:")
@@ -409,11 +435,15 @@ def tune_text(label: str, target: float = 0.9) -> str:
             f"({test['questions'] / max(1, len(fresh)):.0%} answered; 95% range {test['low']:.0%} to {test['high']:.0%}): {verdict}."
         )
     lines.append("The ranges treat questions as independent. Many turn on the same event, so the true ranges are wider.")
-    lines += ["", "By source and kind (every answer, then answers outside the 25% to 75% band):", "| | Questions | Right | Confident answers | Right |", "|---|---|---|---|---|"]
+    lines += [
+        "", "By source and kind (every answer, answers outside the 25% to 75% band, then paper bets at a 10-point gap):",
+        "| | Questions | Right | Confident answers | Right | Paper bets | Return |", "|---|---|---|---|---|---|---|",
+    ]
     for name in sorted({label for row in rows for label in labels(row)}):
         part = [row for row in rows if name in labels(row)]
-        every, sure = score(part), score(confident(part))
-        lines.append(f"| {name} | {every['questions']} | {every['accuracy']:.0%} | {sure['questions']} | {sure['accuracy']:.0%} |")
+        every, sure, bets = score(part), score(confident(part)), paper(part, 0.1)
+        staked = f"{bets['bets']} | {bets['return']:+.0%}" if bets["bets"] else "0 | "
+        lines.append(f"| {name} | {every['questions']} | {every['accuracy']:.0%} | {sure['questions']} | {sure['accuracy']:.0%} | {staked} |")
     overall = choose_rule(rows, target)
     if overall:
         lines.append(f"\nChosen on every question (so its own score would flatter it): {_rule_text(overall)}.")

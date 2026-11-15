@@ -1,16 +1,20 @@
 name: Watch Polymarket markets
 
-# Watches Polymarket markets and tells you what changed. It forecasts a market when it is
-# new or when news breaks, and reports large price moves and price levels you set. It reads
-# public data only: the bot has no account there and places no bets. See AUTOPILOT.md.
+# Watches Polymarket markets, forecasts them, keeps score and guides the owner on their bets.
+# It reads public data only: the bot has no account there and places no bets. How often a
+# market is looked at depends on how soon it closes. See markets.py and AUTOPILOT.md.
 on:
   workflow_dispatch:
     inputs:
       forecasts:
         description: "Most forecasts to make in this run (each takes about ten minutes)"
         default: "4"
+      check:
+        description: "Only check that outcomes can be read from Polymarket"
+        type: boolean
+        default: false
   schedule:
-    - cron: "17 */3 * * *" # every 3 hours
+    - cron: "17 * * * *" # hourly; a market closing soon is looked at every time, a distant one twice a day
 
 concurrency:
   group: ${{ github.workflow }}
@@ -35,6 +39,18 @@ jobs:
           version: "0.13.1"
       - name: Install dependencies
         run: uv sync --locked
+      # The owner's bets, the bot's record and its alerts live in their private "market-alerts"
+      # repository, never here: this repository's logs are public. ALERTS_KEY is a deploy key
+      # that can reach that one repository only.
+      - name: Fetch the private notes
+        env:
+          ALERTS_KEY: ${{ secrets.ALERTS_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/alerts_key"
+          printf '%s\n' "$ALERTS_KEY" > "$RUNNER_TEMP/alerts_key"
+          echo "GIT_SSH_COMMAND=ssh -i $RUNNER_TEMP/alerts_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/alerts_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q --depth 1 "git@github.com:${{ github.repository_owner }}/market-alerts.git" private
       # Hooks, seen headlines, forecast times and last-told prices live in state/. It is a
       # cache: if it is lost the bot rebuilds it, at the cost of one more forecast per market.
       - name: Restore bot state
@@ -44,38 +60,29 @@ jobs:
           key: market-state-${{ github.run_id }}
           restore-keys: market-state-
       - name: Watch
-        run: uv run python autopilot.py --mode markets
+        run: uv run python markets.py ${{ inputs.check && '--settle-check' || '' }}
         env:
+          PRIVATE_DIR: private
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
-          # A secret, so it stays out of this public log. One market link per line, optionally
-          # with levels: "<link> above=0.45 below=0.2".
-          POLYMARKET_WATCH: ${{ secrets.POLYMARKET_WATCH }}
-          AUTO_MARKETS: ${{ vars.AUTO_MARKETS }} # busiest markets to watch unasked (default 6, 0 for none)
-          PRICE_MOVE: ${{ vars.PRICE_MOVE }} # a price change worth a notification (default 0.1)
+          AUTO_MARKETS: ${{ vars.AUTO_MARKETS }} # busiest markets closing in 3 to 90 days (default 6, 0 for none)
+          NEAR_MARKETS: ${{ vars.NEAR_MARKETS }} # busiest markets closing within 3 days (default 6, 0 for none)
+          PRICE_MOVE: ${{ vars.PRICE_MOVE }} # a price change worth an alert (default 0.1)
           MAX_FORECASTS_PER_RUN: ${{ inputs.forecasts || vars.MAX_FORECASTS_PER_RUN || 4 }} # four fit well inside the time limit
           FORECAST_MODELS: ${{ vars.FORECAST_MODELS }}
           UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
           REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
           FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
-      # Alerts go to the owner's private "market-alerts" repository, where a workflow files each
-      # one as an issue and GitHub notifies the owner. Nothing leaves GitHub, and nothing is
-      # printed here. ALERTS_KEY is a deploy key that can push to that one repository only.
-      - name: Send alerts
+      # A workflow in the private repository files each new alert as an issue, and GitHub
+      # notifies the owner. Nothing is printed here.
+      - name: Save the private notes
         if: always() # a run that ends red has still made forecasts worth telling
-        env:
-          ALERTS_KEY: ${{ secrets.ALERTS_KEY }}
         run: |
-          [ -s alerts.md ] && [ -n "$ALERTS_KEY" ] || exit 0
-          install -m 600 /dev/null "$RUNNER_TEMP/alerts_key"
-          printf '%s\n' "$ALERTS_KEY" > "$RUNNER_TEMP/alerts_key"
-          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/alerts_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          git clone -q --depth 1 "git@github.com:${{ github.repository_owner }}/market-alerts.git" "$RUNNER_TEMP/market-alerts"
-          mkdir -p "$RUNNER_TEMP/market-alerts/alerts"
-          cp alerts.md "$RUNNER_TEMP/market-alerts/alerts/$(date -u +%Y%m%dT%H%M%SZ).md"
-          cd "$RUNNER_TEMP/market-alerts"
+          cd private
           git add -A
-          git -c user.name="market watch" -c user.email="market-watch@users.noreply.github.com" commit -q -m "Market alert"
+          git diff --cached --quiet && exit 0
+          git -c user.name="market watch" -c user.email="market-watch@users.noreply.github.com" commit -q -m "Market watch"
+          git pull -q --rebase # the owner may have edited watch.txt meanwhile
           git push -q
       - name: Save bot state
         if: always()
