@@ -132,13 +132,17 @@ Settings, in Settings → Secrets and variables → Actions:
 
 | Name | Kind | What it does |
 |---|---|---|
-| `NTFY_TOPIC` | Secret | Where notifications go. Subscribe to the same topic in the free ntfy app, or open `https://ntfy.sh/<topic>` in a browser. Anyone who knows the topic can read it, so keep it private |
+| `ALERTS_KEY` | Secret | A key that can push to your private `market-alerts` repository and nothing else. Already set |
 | `POLYMARKET_WATCH` | Secret | Your markets, one link per line. Add levels to be told about: `<link> above=0.45 below=0.2`. It is a secret because this repository's run pages are public |
 | `AUTO_MARKETS` | Variable | How many of the busiest markets to watch unasked. Default 6; 0 watches only your list |
 | `PRICE_MOVE` | Variable | The price change worth a notification. Default 0.1 (10 points) |
 
-Without `NTFY_TOPIC` the workflow still runs; the forecasts and price moves are on each
-run's summary page. Levels you set are only ever sent to your topic, never written there.
+**How alerts reach you.** Everything stays inside your own GitHub account. The run pushes
+its alerts to your private `market-alerts` repository, a small workflow there files them
+as an issue that mentions you, and GitHub sends the notification: an email, and a push on
+your phone if the GitHub app is installed. No outside service is involved. Forecasts and
+price moves are also on each run's public summary page; levels you set appear only in
+the private issue.
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a

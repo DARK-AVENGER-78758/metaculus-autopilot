@@ -48,10 +48,9 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
-          # Both are secrets so they stay out of this public log. The watch list is one market
-          # link per line, optionally with levels: "<link> above=0.45 below=0.2".
+          # A secret, so it stays out of this public log. One market link per line, optionally
+          # with levels: "<link> above=0.45 below=0.2".
           POLYMARKET_WATCH: ${{ secrets.POLYMARKET_WATCH }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }} # where notifications go: https://ntfy.sh/<topic>
           AUTO_MARKETS: ${{ vars.AUTO_MARKETS }} # busiest markets to watch unasked (default 6, 0 for none)
           PRICE_MOVE: ${{ vars.PRICE_MOVE }} # a price change worth a notification (default 0.1)
           MAX_FORECASTS_PER_RUN: ${{ inputs.forecasts || vars.MAX_FORECASTS_PER_RUN }}
@@ -59,6 +58,24 @@ jobs:
           UTILITY_MODELS: ${{ vars.UTILITY_MODELS }}
           REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE }}
           FORECAST_SAMPLES: ${{ vars.FORECAST_SAMPLES }}
+      # Alerts go to the owner's private "market-alerts" repository, where a workflow files each
+      # one as an issue and GitHub notifies the owner. Nothing leaves GitHub, and nothing is
+      # printed here. ALERTS_KEY is a deploy key that can push to that one repository only.
+      - name: Send alerts
+        env:
+          ALERTS_KEY: ${{ secrets.ALERTS_KEY }}
+        run: |
+          [ -s alerts.md ] && [ -n "$ALERTS_KEY" ] || exit 0
+          install -m 600 /dev/null "$RUNNER_TEMP/alerts_key"
+          printf '%s\n' "$ALERTS_KEY" > "$RUNNER_TEMP/alerts_key"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/alerts_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q --depth 1 "git@github.com:${{ github.repository_owner }}/market-alerts.git" "$RUNNER_TEMP/market-alerts"
+          mkdir -p "$RUNNER_TEMP/market-alerts/alerts"
+          cp alerts.md "$RUNNER_TEMP/market-alerts/alerts/$(date -u +%Y%m%dT%H%M%SZ).md"
+          cd "$RUNNER_TEMP/market-alerts"
+          git add -A
+          git -c user.name="market watch" -c user.email="market-watch@users.noreply.github.com" commit -q -m "Market alert"
+          git push -q
       - name: Save bot state
         if: always()
         continue-on-error: true # losing the cache only costs a rebuild

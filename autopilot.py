@@ -90,6 +90,7 @@ MAX_FORECASTS_PER_RUN = int(_env("MAX_FORECASTS_PER_RUN", "6"))  # about 8 minut
 # timing out, when more than two of their calls run at once. Raise this if the roster gets faster.
 AUTO_MARKETS = int(_env("AUTO_MARKETS", "6"))  # market lane: how many of the busiest markets to watch unasked
 PRICE_MOVE = float(_env("PRICE_MOVE", "0.1"))  # market lane: a price change this large is worth telling the user
+ALERTS = Path("alerts.md")  # market lane: what to tell the user after this run; never committed or printed
 BATCH = 1  # questions forecast at the same time
 
 RELEVANCE_SCALE = [
@@ -822,22 +823,13 @@ def price_alerts(link: str, price: float, levels: dict[str, float], state: dict)
     return moves, crossed
 
 
-def notify(lines: list[str]) -> None:
-    """Send the user a phone notification through ntfy.sh, if NTFY_TOPIC is set. A failure is only logged."""
-    topic = os.getenv("NTFY_TOPIC")
-    if not topic or not lines:
-        return
-    try:
-        requests.post(
-            f"https://ntfy.sh/{topic}", data="\n".join(lines)[:3900].encode(),
-            headers={"Title": "Market watch", "Markdown": "yes"}, timeout=15,
-        ).raise_for_status()
-    except requests.RequestException as error:
-        logger.warning(f"The notification was not sent: {type(error).__name__}")  # the address holds the topic
-
-
 def watch_markets(bot: Autopilot, tell: bool) -> tuple[list[MetaculusQuestion], list, list[str]]:
-    """The market lane: forecast watched markets when they are new or news breaks, and tell the user. No bets."""
+    """The market lane: forecast watched markets when they are new or news breaks, and tell the user. No bets.
+
+    What to tell the user is written to ALERTS. The workflow files that as an issue in the
+    owner's private alerts repository, and GitHub notifies them. Nothing leaves GitHub.
+    """
+    ALERTS.unlink(missing_ok=True)
     watch = market_watch()
     questions = [as_question(row) for row, _ in watch]
     reports, summary = asyncio.run(run(bot, questions, one_shot=False, record=tell))
@@ -849,8 +841,9 @@ def watch_markets(bot: Autopilot, tell: bool) -> tuple[list[MetaculusQuestion], 
             hooks.save_state(_key(question), state)
         summary += moves
         private += crossed
-    if tell:
-        notify([line for line in summary if line.startswith(("- Forecast", "- Price"))] + private)
+    alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private
+    if tell and alerts:
+        ALERTS.write_text("\n".join(alerts) + "\n", encoding="utf-8")
     return questions, reports, summary
 
 

@@ -637,18 +637,22 @@ def test_market_lane_watches_the_list_and_tells_the_user_once_about_moves_and_le
     moves, crossed = autopilot.price_alerts(link, 0.18, levels, state)
     assert len(moves) == 1 and "now below your level of 20%" in crossed[0]
 
-    sent, real_topic = [], os.environ.pop("NTFY_TOPIC", None)  # a topic in the local .env must not reach this check
-    try:
-        with setting(autopilot.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["data"])) or FakeResponse()):
-            autopilot.notify(["- Price moved"])  # no topic set: nothing leaves
-            os.environ["NTFY_TOPIC"] = "topic-1"
-            autopilot.notify(["- Price moved", "- Forecast"])
-            autopilot.notify([])  # nothing to say
-    finally:
-        del os.environ["NTFY_TOPIC"]
-        if real_topic:
-            os.environ["NTFY_TOPIC"] = real_topic
-    assert sent == [("https://ntfy.sh/topic-1", b"- Price moved\n- Forecast")]
+    # A whole run: the forecast and the crossed level go to the alerts file, and the level stays off the public page.
+    row = {
+        "id": "polymarket-a", "question": "Will A happen?", "url": "https://polymarket.com/market/a",
+        "resolution_criteria": "Resolves Yes if A happens.", "market_info_close_datetime": (NOW + timedelta(days=30)).isoformat(),
+        "freeze_datetime": NOW.isoformat(), "price": 0.5,
+    }
+    alerts = hooks.STATE_DIR / "alerts.md"
+    alerts.write_text("left over from an earlier run", encoding="utf-8")
+    with setting(autopilot, "market_watch", lambda: [(row, {"above": 0.45})]), setting(autopilot, "ALERTS", alerts):
+        with setting(hooks, "poll", lambda hook_list, days, until=None: [item("A is confirmed")]):
+            questions, reports, summary = autopilot.watch_markets(make_bot(), tell=True)
+            told = alerts.read_text(encoding="utf-8")
+            again = autopilot.watch_markets(make_bot(), tell=True)[2]
+    assert "- Forecast: [Will A happen?]" in told and "against the market's 50%" in told and "left over" not in told
+    assert "now above your level of 45%" in told and "your level" not in "\n".join(summary)
+    assert not alerts.exists() and not any(line.startswith("- Forecast") for line in again)  # nothing new: nothing to tell
 
 
 def test_series_facts_come_from_history_and_from_the_linked_symbol():
