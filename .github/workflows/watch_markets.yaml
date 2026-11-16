@@ -10,7 +10,11 @@ on:
         description: "Most forecasts to make in this run (each takes about ten minutes)"
         default: "4"
       check:
-        description: "Only check that outcomes can be read from Polymarket"
+        description: "Only check that outcomes and live quotes can be read from Polymarket"
+        type: boolean
+        default: false
+      paced:
+        description: "Wait half an hour first (the workflow sets this when it starts its own next run)"
         type: boolean
         default: false
   schedule:
@@ -18,12 +22,23 @@ on:
         # closing soon is looked at every time, a distant one twice a day; a run with nothing due is short.
     - cron: "7,27,47 * * * *"
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
 jobs:
+  # GitHub's scheduler started two scheduled runs in a day and a half, so every run starts the
+  # next one itself (last step below). This job makes that next run wait: the "pace"
+  # environment has a 30-minute wait timer and nothing else, and waiting there uses no runner.
+  # To stop the chain, cancel the waiting run or disable this workflow.
+  pace:
+    if: inputs.paced
+    runs-on: ubuntu-latest
+    environment: pace
+    steps:
+      - run: echo "Waited half an hour."
   watch:
+    needs: pace
+    if: always() && needs.pace.result != 'failure' && needs.pace.result != 'cancelled'
+    concurrency: # one watch at a time; a run waiting in "pace" does not hold this
+      group: market-watch
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -101,3 +116,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch_markets.yaml/enable"
+      # Only when no other run of this workflow is waiting or running, so there is one chain.
+      - name: Start the next run
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          others=$(gh run list -R "$GITHUB_REPOSITORY" --workflow watch_markets.yaml --limit 20 --json status,databaseId \
+            --jq "[.[] | select(.status != \"completed\" and .databaseId != $GITHUB_RUN_ID)] | length")
+          if [ "$others" -eq 0 ]; then gh workflow run watch_markets.yaml -R "$GITHUB_REPOSITORY" -f paced=true; fi

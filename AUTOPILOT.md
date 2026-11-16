@@ -118,10 +118,13 @@ the market's price. The same thing from a terminal:
 
 ### Watching Polymarket markets (`markets.py`)
 
-The **Watch Polymarket markets** workflow is scheduled three times an hour with nobody at
-the keyboard. GitHub runs scheduled jobs when it has room and skips many of them, so in
-practice it runs every one to four hours. It places no bets: it watches, forecasts,
-keeps score and tells you what it would do.
+The **Watch Polymarket markets** workflow runs with nobody at the keyboard, about every
+40 to 60 minutes. GitHub's own scheduler proved useless for this (two scheduled runs in
+a day and a half), so each run starts the next one itself: the next run waits half an
+hour in the `pace` environment, which uses no runner, and then works. The schedule
+lines remain only to restart the chain if it ever breaks. To stop it, cancel the
+waiting run or disable the workflow. It places no bets: it watches, forecasts, keeps
+score and tells you what it would do.
 
 | Step | What happens |
 |---|---|
@@ -196,7 +199,7 @@ themselves. One coin behaves like one dollar on Polymarket.
 | A losing share | Pays nothing: the stake is lost | The same |
 | A change of mind | The position is sold, and the other side may be bought | The same, if you choose to |
 | Thin markets | Not traded under 500 dollars of resting orders, or with bid and ask 10 points apart | You could, at a bad price |
-| Price updates | Each time the bot runs, every one to four hours | Tick by tick |
+| Price updates | Each time the bot runs, about every 40 to 60 minutes | Tick by tick |
 | Size | Small stakes, assumed filled at the best price | Large orders move the price |
 | Fees | Not charged | Charged on some markets |
 
