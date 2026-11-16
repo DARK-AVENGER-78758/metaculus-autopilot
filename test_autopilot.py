@@ -708,6 +708,7 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     assert "Back the bot 1,019, Fade the bot 980" in alerts[1].read_text(encoding="utf-8")
     card = (private / "scorecard.md").read_text(encoding="utf-8")
     assert "## Practice betting with fake coins" in card and "| Back the bot | 0 | 1 | 1 | +96% |" in card
+    assert "**Referee:** 2 practice trades replayed, none broke a rule." in card and "Goal: turn 1,000 coins into 5,000" in card
     assert "### Latest practice trades" in card and "Back the bot bought 39 Yes at 51¢ for 20 coins (bot 70%, bid 49¢, ask 51¢)" in card
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
 
@@ -759,10 +760,36 @@ def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_ear
     assert wallet.trade([empty_book], trades, {}, "t") == []  # nobody to sell to: the position stays, even though the bot changed its mind
     assert round(wallet.positions(trades, {}, {"m1": empty_book})[0]["now"], 2) == 0.6  # valued at the last shown price
 
+    # The referee replays the log: the real one is clean, and a doctored trade is caught.
+    assert wallet.audit(trades + later, {}) == [] and all(t["rules"] == wallet.RULES_VERSION for t in trades)
+    cheap = [{**trades[0], "price": 0.40, "shares": 50.0}]  # pretends to have bought 12 cents under the asking price
+    assert "not bought at the live asking price" in wallet.audit(cheap, {})[0]
+    greedy = [{**trades[0], "coins": 500.0, "shares": round(500 / 0.52, 4)}]  # a stake of half the wallet
+    assert "more than 2% of its 1000.00 spare coins" in wallet.audit(greedy, {})[0]
+    assert "after the market's result was known" in wallet.audit(trades, {"m1": 1}, {"m1": "t0"})[0]
+    assert "sold a position it did not hold" in wallet.audit(later, {})[0]
+
     # Forty closed bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.
     def run(count, wins):
-        bought = [{"rule": "Back the bot", "id": f"m{n}", "action": "buy", "side": "yes", "price": 0.5, "coins": 10.0, "shares": 20.0} for n in range(count)]
+        bought = [
+            {"rule": "Back the bot", "id": f"m{n}", "action": "buy", "side": "yes", "price": 0.5, "coins": 10.0, "shares": 20.0, "bid": 0.48, "ask": 0.5}
+            for n in range(count)
+        ]
         return bought, {f"m{n}": int(n % 10 < wins) for n in range(count)}
+
+    # The learner wallet buys nothing until a fixed rule has ten closed bets and is ahead; then it copies that rule.
+    assert wallet.leader(trades, {}) is None and not [t for t in trades if t["rule"] == wallet.LEARNER]
+    assert wallet.leader(*run(10, 8)) == "Back the bot" and wallet.leader(*run(9, 8)) is None and wallet.leader(*run(10, 4)) is None
+    won_log, results = run(10, 8)
+    copied = wallet.trade([market(99, 0.7, 0.48, 0.52)], won_log, results, "t9")
+    assert [(t["rule"], t["side"]) for t in copied] == [("Back the bot", "yes"), ("Fade the bot", "no"), (wallet.LEARNER, "yes")]
+
+    # The goal is reached only by winning: a wallet at 5,000 opens nothing new, and its course is reported honestly.
+    rich = [{"rule": "Back the bot", "id": "big", "action": "buy", "side": "yes", "price": 0.01, "coins": 50.0, "shares": 5000.0, "bid": 0.0, "ask": 0.01}]
+    assert not [t for t in wallet.trade([market(98, 0.7, 0.48, 0.52)], rich, {"big": 1}, "t") if t["rule"] == "Back the bot"]
+    ahead, behind = wallet.standings(*run(10, 8), {})["Back the bot"], wallet.standings(*run(10, 4), {})["Back the bot"]
+    assert wallet.course(ahead).startswith("about ") and wallet.course(behind) == "not on course"
+    assert wallet.course(wallet.standings(trades, {}, {})["Back the bot"]) == "too early to say"
 
     assert wallet.standings(*run(40, 8), {})["Back the bot"]["earned"] and not wallet.standings(*run(39, 8), {})["Back the bot"]["earned"]
     assert not wallet.standings(*run(40, 4), {})["Back the bot"]["earned"]

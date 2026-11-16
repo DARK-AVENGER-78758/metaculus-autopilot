@@ -13,6 +13,11 @@ that keeps making coins earns the right to be pointed out to the owner: see `ear
 
 Known gaps against a real account: prices are seen only when the bot runs, not tick by tick;
 a small stake is assumed to fill at the best price; trading fees are not charged.
+
+The owner's goal is to turn START coins into GOAL, by winning bets and in no other way. So
+the rules below are fixed, a stake is always STAKE of the spare coins, and `audit` replays
+the whole trade log on every run and reports anything that broke a rule. If a rule ever
+has to change, RULES_VERSION goes up and every wallet starts again from START.
 """
 
 from __future__ import annotations
@@ -28,6 +33,10 @@ MAX_OPEN = 25  # positions a rule may hold at once; at 2% each that is half its 
 MIN_LIQUIDITY = 500.0  # dollars resting in a market's order book before a rule will trade it, when the market says
 MAX_SPREAD = 0.10  # a wider gap between bid and ask means nobody is there to trade with at a fair price
 EARN_BETS, EARN_T = 40, 2.5  # closed bets, and how clearly above zero the gain per bet must be, before a rule earns a say
+GOAL = 5000.0  # the owner's target for a wallet; one that gets there stops opening new bets
+RULES_VERSION = 2  # stamped on every trade; trades from before the stamp existed were made under version 2
+LEARNER = "Follow the best"  # a fifth wallet that copies whichever fixed rule has done best so far
+LEARN_BETS = 10  # closed bets a rule needs before the learner will follow it
 
 
 def _lean(edge: float, held: str | None) -> str | None:
@@ -75,6 +84,19 @@ RULES = {
     "Back the favourite": back_the_favourite,
     "Bot when very sure": bot_when_sure,
 }
+
+
+WALLETS = [*RULES, LEARNER]
+
+
+def leader(trades: list[dict], outcomes: dict) -> str | None:
+    """The fixed rule the learner follows now: the best gain per closed bet, if it has made coins at all."""
+    best, best_gain = None, 0.0
+    for name in RULES:
+        gains = book(name, trades, outcomes)[2]
+        if len(gains) >= LEARN_BETS and statistics.mean(gains) > best_gain:
+            best, best_gain = name, statistics.mean(gains)
+    return best
 
 
 def quotes(market: dict) -> tuple[float, float]:
@@ -133,8 +155,12 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
     position at the price a seller gets; a purchase pays the price a buyer pays.
     """
     new = []
-    for name, rule in RULES.items():
+    followed = leader(trades, outcomes)
+    keep = lambda forecast, price, held=None: held  # noqa: E731  no rule to follow yet: hold what it has, buy nothing
+    live = {market["id"]: market for market in markets}
+    for name, rule in [*RULES.items(), (LEARNER, RULES[followed] if followed else keep)]:
         coins, held, _ = book(name, trades, outcomes)
+        worth = coins + sum(row["value"] for row in positions(trades, outcomes, live) if row["rule"] == name)
         for market in markets:
             key = market["id"]
             if key in outcomes or market.get("forecast") is None:
@@ -147,7 +173,7 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
             want = rule(market["forecast"], mid, side)
             seen = {
                 "rule": name, "id": key, "question": market["question"], "url": market["url"], "at": at,
-                "forecast": market["forecast"], "bid": bid, "ask": ask,
+                "forecast": market["forecast"], "bid": bid, "ask": ask, "rules": RULES_VERSION,
             }
             if side and want != side:
                 bought = held.pop(key)
@@ -156,7 +182,8 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
                 coins += got
                 side = None
             stake, thin = round(STAKE * coins, 2), (market.get("liquidity") or MIN_LIQUIDITY) < MIN_LIQUIDITY
-            if want and not side and stake >= 1 and len(held) < MAX_OPEN and not thin and 0.01 <= buy_at(want, bid, ask) <= 0.99:
+            buying = want and not side and worth < GOAL  # a wallet that has reached the goal opens nothing new
+            if buying and stake >= 1 and len(held) < MAX_OPEN and not thin and 0.01 <= buy_at(want, bid, ask) <= 0.99:
                 price = buy_at(want, bid, ask)
                 held[key] = {**seen, "action": "buy", "side": want, "price": price, "shares": round(stake / price, 4), "coins": stake}
                 new.append(held[key])
@@ -167,7 +194,7 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
 def positions(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> list[dict]:
     """Every open practice position with what it would sell for now. `markets` maps a market id to its live quote."""
     rows = []
-    for name in RULES:
+    for name in WALLETS:
         for key, bought in book(name, trades, outcomes)[1].items():
             now = None  # unknown: valued at cost
             if key in markets:
@@ -184,7 +211,7 @@ def standings(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> d
     """Each rule's wallet: its bets, its results, and its coins with open positions valued at what they would sell for."""
     open_now = positions(trades, outcomes, markets)
     table = {}
-    for name in RULES:
+    for name in WALLETS:
         coins, held, gains = book(name, trades, outcomes)
         per_bet, t = _margin(gains)
         table[name] = {
@@ -193,6 +220,66 @@ def standings(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> d
             "per_bet": per_bet, "t": t, "earned": len(gains) >= EARN_BETS and t >= EARN_T,
         }
     return table
+
+
+def audit(trades: list[dict], outcomes: dict, settled_at: dict | None = None) -> list[str]:
+    """The referee: replay every trade and list each one that broke the practice account's rules.
+
+    An empty list means a clean log: every purchase at the live asking price, every sale at
+    the live bid, no stake above STAKE of the spare coins, no trade on a market whose result
+    was already known, and every wallet's coins adding up.
+    """
+    problems, coins, held = [], {name: START for name in WALLETS}, {name: {} for name in WALLETS}
+    for number, trade in enumerate(trades, 1):
+        name, key = trade.get("rule"), trade.get("id")
+        flag = lambda what: problems.append(f"Trade {number} ({name}, {str(trade.get('at'))[:16]}): {what}")  # noqa: E731
+        if name not in coins:
+            flag("made by a wallet that does not exist")
+            continue
+        if trade.get("rules", RULES_VERSION) != RULES_VERSION:
+            flag(f"made under rules version {trade.get('rules')}, not {RULES_VERSION}")
+        if settled_at and key in settled_at and str(trade.get("at")) > settled_at[key]:
+            flag("made after the market's result was known")
+        bid, ask = trade["bid"], trade["ask"]
+        if ask - bid > MAX_SPREAD:
+            flag("made with no real market to trade against")
+        if trade["action"] == "buy":
+            if key in held[name]:
+                flag("bought a market it already held")
+            if abs(trade["price"] - buy_at(trade["side"], bid, ask)) > 1e-9:
+                flag("not bought at the live asking price")
+            if trade["coins"] > STAKE * coins[name] + 0.01:
+                flag(f"staked {trade['coins']:.2f} coins, more than {STAKE:.0%} of its {coins[name]:.2f} spare coins")
+            if abs(trade["shares"] * trade["price"] - trade["coins"]) > 0.01:
+                flag("its shares, price and coins do not add up")
+            if len(held[name]) >= MAX_OPEN:
+                flag(f"held more than {MAX_OPEN} positions")
+            coins[name] -= trade["coins"]
+            held[name][key] = trade
+        else:
+            bought = held[name].pop(key, None)
+            if bought is None:
+                flag("sold a position it did not hold")
+                continue
+            if abs(trade["price"] - sell_at(trade["side"], bid, ask)) > 1e-9:
+                flag("not sold at the live bid")
+            if abs(trade["coins"] - bought["shares"] * trade["price"]) > 0.01:
+                flag("its shares, price and coins do not add up")
+            coins[name] += trade["coins"]
+    return problems
+
+
+def course(row: dict) -> str:
+    """How far a wallet is from the goal at the rate it has actually been winning."""
+    if row["coins"] >= GOAL:
+        return "reached"
+    if row["closed"] < LEARN_BETS:
+        return "too early to say"
+    if row["per_bet"] <= 0:
+        return "not on course"
+    import math
+
+    return f"about {math.log(GOAL / row['coins']) / math.log(1 + STAKE * row['per_bet']):,.0f} more bets at this rate"
 
 
 def backtest(rows: list[dict]) -> dict[str, dict]:

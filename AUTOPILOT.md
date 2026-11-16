@@ -210,6 +210,22 @@ the live price:
 | Back the favourite | The side priced 80% to 95%, whatever the bot says | When it falls under 70% |
 | Bot when very sure | The bot's side under 10% or over 90%, if the price is 5 points behind | When the bot is no longer sure |
 
+**The goal and the referee.** The owner's goal is to turn 1,000 fake coins into 5,000 by
+winning bets, and in no other way. Three things keep that honest:
+
+- **Fixed rules.** A stake is always 2% of spare coins, so no wallet can reach the goal on one
+  lucky gamble. If a rule ever has to change, every wallet starts again from 1,000.
+- **A referee on every run.** `wallet.audit` replays the whole trade log and reports any trade
+  that was not at the live asking price or bid, was over the stake limit, was made after its
+  market's result was known, or does not add up. The scorecard shows its verdict.
+- **A dated record.** Each run's trades are committed to the private repository with
+  GitHub's own timestamp, before the markets resolve.
+
+A fifth wallet, "Follow the best", is the learner: once one of the four rules has 10 closed
+bets and is ahead, it copies that rule, and it moves if another rule overtakes. The
+scorecard's "Course to the goal" column says how many more bets each wallet would need at
+the rate it has actually been winning, or "not on course".
+
 A rule stakes 2% of its spare coins a bet and holds at most 25 positions. A market with an
 open position is followed until it resolves, so the bot keeps forecasting it and the rule
 can react. Every trade is in `bets.jsonl`; the scorecard shows each wallet, every open

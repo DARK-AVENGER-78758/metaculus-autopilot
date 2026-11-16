@@ -105,7 +105,7 @@ def watch_list() -> tuple[list[tuple[dict, dict]], list[str]]:
             watch[row["id"]] = (row, bet)
     outcomes = {row["id"]: row["outcome"] for row in read_ledger() if "outcome" in row}
     trades = _read("bets.jsonl")
-    held = {key: bought["url"] for name in wallet.RULES for key, bought in wallet.book(name, trades, outcomes)[1].items()}
+    held = {key: bought["url"] for name in wallet.WALLETS for key, bought in wallet.book(name, trades, outcomes)[1].items()}
     for key, link in held.items():  # a market with an open practice position is followed until it resolves
         if key not in watch:
             try:
@@ -195,11 +195,14 @@ def read_ledger() -> list[dict]:
     return _read("ledger.jsonl")
 
 
-def practise(ledger: list[dict], listed: list[tuple[dict, dict]], settled_now: list[dict], at: str) -> tuple[list[str], list[dict], dict, list[dict]]:
+def practise(
+    ledger: list[dict], listed: list[tuple[dict, dict]], settled_now: list[dict], at: str
+) -> tuple[list[str], list[dict], dict, list[dict], list[str]]:
     """The fake-coin wallets' turn, as on a real account: settle, look at every position again, trade at live prices.
 
-    Returns the lines for the owner, the new trades, each rule's standing and the open
-    positions. No real money or account is involved anywhere.
+    Returns the lines for the owner, the new trades, each rule's standing, the open
+    positions, and what the referee found wrong with the trade log (nothing, if it is clean).
+    No real money or account is involved anywhere.
     """
     trades = _read("bets.jsonl")
     outcomes = {row["id"]: row["outcome"] for row in ledger if "outcome" in row}
@@ -209,7 +212,7 @@ def practise(ledger: list[dict], listed: list[tuple[dict, dict]], settled_now: l
     lines = []
     for outcome in settled_now:  # what each rule still held when the market resolved
         results, link = [], ""
-        for name in wallet.RULES:
+        for name in wallet.WALLETS:
             bought = wallet.book(name, trades, before)[1].get(outcome["id"])
             if bought:
                 paid_out = bought["shares"] * (outcome["outcome"] if bought["side"] == "yes" else 1 - outcome["outcome"])
@@ -236,7 +239,10 @@ def practise(ledger: list[dict], listed: list[tuple[dict, dict]], settled_now: l
         for trade in new
         if trade["action"] == "buy" and trade["rule"] in proven
     ]
-    return lines, new, wallet.standings(trades + new, outcomes, live), wallet.positions(trades + new, outcomes, live)
+    broken = wallet.audit(trades + new, outcomes, {row["id"]: row["settled_at"] for row in ledger if "outcome" in row})
+    if broken:
+        lines.append(f"- The referee found {len(broken)} practice trades that broke the rules. They are listed in the scorecard.")
+    return lines, new, wallet.standings(trades + new, outcomes, live), wallet.positions(trades + new, outcomes, live), broken
 
 
 def _first_forecasts(ledger: list[dict]) -> dict[str, dict]:
@@ -287,7 +293,8 @@ def record(ledger: list[dict]) -> str:
 
 
 def scorecard(
-    ledger: list[dict], problems: list[str], wallets: dict | None = None, held: list[dict] = (), trades: list[dict] = ()
+    ledger: list[dict], problems: list[str], wallets: dict | None = None, held: list[dict] = (), trades: list[dict] = (),
+    broken: list[str] = (), checked: int = 0,
 ) -> str:
     graded, first = _graded(ledger), _first_forecasts(ledger)
     settled = {row["id"] for row in graded}
@@ -327,12 +334,21 @@ def scorecard(
             f"nothing if it loses. No real money is involved. A rule earns a say after {wallet.EARN_BETS} closed bets if its gain per "
             f"bet is clearly above zero (a margin of {wallet.EARN_T} or more); its new bets are then pointed out to you.",
             "",
-            "| Rule | Open | Closed | Won | Gain per coin staked | Margin | Spare coins | Total with open bets | Earned a say |",
-            "|---|---|---|---|---|---|---|---|---|",
+            f"**Goal: turn {wallet.START:,.0f} coins into {wallet.GOAL:,.0f} by winning bets, and in no other way.** The rules are fixed, "
+            f"a stake is always {wallet.STAKE:.0%}, and a wallet that gets there stops opening new bets. \"{wallet.LEARNER}\" is a "
+            f"fifth wallet that copies whichever of the four rules has made the most per bet, once one has {wallet.LEARN_BETS} closed bets and is ahead.",
+            "",
+            f"**Referee:** {checked} practice trades replayed, "
+            + (f"{len(broken)} broke a rule:" if broken else "none broke a rule. Each was bought at the live asking price or sold at the live "
+               "bid, within the stake limit, before its market's result was known, and every wallet's coins add up."),
+            *[f"- {problem}" for problem in broken],
+            "",
+            "| Rule | Open | Closed | Won | Gain per coin staked | Margin | Spare coins | Total with open bets | Course to the goal | Earned a say |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         lines += [
             f"| {name} | {row['open']} | {row['closed']} | {row['won']} | {row['per_bet']:+.0%} | {row['t']:+.1f} | "
-            f"{row['spare']:,.0f} | {row['coins']:,.0f} | {'yes' if row['earned'] else 'no'} |"
+            f"{row['spare']:,.0f} | {row['coins']:,.0f} | {wallet.course(row)} | {'yes' if row['earned'] else 'no'} |"
             for name, row in wallets.items()
         ]
         cents = lambda price: "not quoted" if price is None else f"{price * 100:.0f}¢"  # noqa: E731
@@ -400,17 +416,18 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
             f"The bot said {row['forecast']:.0%}, the market {row['price']:.0%}"
         )
     ledger += fresh
-    practice, new_trades, wallets, held = practise(ledger, listed, settled_now, now.isoformat(timespec="seconds"))
+    practice, new_trades, wallets, held, broken = practise(ledger, listed, settled_now, now.isoformat(timespec="seconds"))
     alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private + practice
     if tell:
         (PRIVATE / "alerts").mkdir(parents=True, exist_ok=True)
         for name, entries in (("ledger.jsonl", fresh), ("bets.jsonl", new_trades)):
             with open(PRIVATE / name, "a", encoding="utf-8") as out:
                 out.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
-        (PRIVATE / "scorecard.md").write_text(scorecard(ledger, problems, wallets, held, _read("bets.jsonl")[-20:]), encoding="utf-8")
+        log = _read("bets.jsonl")
+        (PRIVATE / "scorecard.md").write_text(scorecard(ledger, problems, wallets, held, log[-20:], broken, len(log)), encoding="utf-8")
         if alerts:
             coins = ", ".join(f"{name} {row['coins']:,.0f}" for name, row in wallets.items())
-            foot = ["", record(ledger), f"Fake-coin wallets (each started with {wallet.START:,.0f}): {coins}."]
+            foot = ["", record(ledger), f"Fake-coin wallets (each started with {wallet.START:,.0f}): {coins}. Goal: {wallet.GOAL:,.0f}."]
             (PRIVATE / "alerts" / f"{now:%Y%m%dT%H%M%SZ}.md").write_text("\n".join(alerts + foot) + "\n", encoding="utf-8")
     return questions, summary
 
