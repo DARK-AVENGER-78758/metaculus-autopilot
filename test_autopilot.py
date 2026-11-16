@@ -24,6 +24,7 @@ import hooks
 import markets
 import models
 import tools
+import wallet
 from forecasting_tools import (
     BinaryQuestion,
     BinaryReport,
@@ -692,11 +693,48 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     ledger = [json.loads(line) for line in (private / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [entry.get("forecast", entry.get("outcome")) for entry in ledger] == [0.7, 1] and ledger[0]["price"] == 0.5
     assert "- Forecast: [Will A happen?]" in first_alert and "Cash out: your Yes bet bought at 32% is now 50% (+56%), at your target of 45%" in first_alert
+    # The bot said 70% against a price of 50%, so two rules practise on it with fake coins, on opposite sides.
+    assert "Practice bet (fake coins): Back the bot bought Yes at 51% for 20; Fade the bot bought No at 51% for 20" in first_alert
+    assert "Fake-coin wallets (each started with 1,000): Back the bot 999, Fade the bot 999, Back the favourite 1,000" in first_alert
+    bets = [json.loads(line) for line in (private / "bets.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(bet["rule"], bet["side"], bet["stake"]) for bet in bets] == [("Back the bot", "yes", 20.0), ("Fade the bot", "no", 20.0)]
     assert markets.UNTESTED in first_alert and "bet" not in "\n".join(summary)  # the public page never shows a bet
     alerts = sorted((private / "alerts").iterdir())
     assert len(alerts) == 2 and "Resolved Yes" in alerts[1].read_text(encoding="utf-8") and "bot right 100%" in alerts[1].read_text(encoding="utf-8")
+    assert "Practice result (fake coins): Back the bot won 19, Fade the bot lost 20" in alerts[1].read_text(encoding="utf-8")
+    assert "Back the bot 1,019, Fade the bot 980" in alerts[1].read_text(encoding="utf-8")
     card = (private / "scorecard.md").read_text(encoding="utf-8")
+    assert "## Practice betting with fake coins" in card and "| Back the bot | 1 | 1 | 1 | +96% |" in card
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
+
+
+def test_fake_coin_wallets_bet_by_rule_settle_and_only_a_proven_rule_earns_a_say():
+    assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None]
+    assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no"]  # a favourite, and the bot is very sure
+    assert wallet.cost("yes", 0.5) == 0.51 and abs(wallet.cost("no", 0.8) - 0.21) < 1e-9 and wallet.cost("yes", 0.995) == 0.99
+
+    market = lambda n, forecast, price: {"id": f"m{n}", "question": f"Q{n}?", "url": f"https://example.org/{n}", "forecast": forecast, "price": price}  # noqa: E731
+    bets = wallet.place([market(1, 0.7, 0.5), market(2, 0.52, 0.5)], [], {}, "now")
+    assert [(bet["rule"], bet["id"], bet["side"], bet["stake"]) for bet in bets] == [("Back the bot", "m1", "yes", 20.0), ("Fade the bot", "m1", "no", 20.0)]
+    assert wallet.place([market(1, 0.8, 0.5)], bets, {}, "later") == []  # a rule bets once on a market
+    table = wallet.standings(bets, {}, {"m1": 0.6})
+    assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.51 * 0.59, 2)  # an open bet is worth what it would sell for
+    assert round(wallet.standings(bets, {}, {})["Back the bot"]["coins"], 2) == 1000.0  # price unknown: valued at cost
+    table = wallet.standings(bets, {"m1": 1}, {})
+    assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.51, 2) and table["Fade the bot"]["coins"] == 980.0
+    assert (table["Back the bot"]["won"], table["Fade the bot"]["won"], table["Back the bot"]["earned"]) == (1, 0, False)
+
+    # Forty settled bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.
+    run = lambda count, wins: (  # noqa: E731
+        [{"rule": "Back the bot", "id": f"m{n}", "side": "yes", "paid": 0.5, "stake": 10.0, "shares": 20.0} for n in range(count)],
+        {f"m{n}": int(n % 10 < wins) for n in range(count)},
+    )
+    assert wallet.standings(*run(40, 8), {})["Back the bot"]["earned"] and not wallet.standings(*run(39, 8), {})["Back the bot"]["earned"]
+    assert not wallet.standings(*run(40, 4), {})["Back the bot"]["earned"]
+
+    rows = [{"forecast": 0.7, "crowd": 0.5, "outcome": 1}, {"forecast": 0.7, "crowd": 0.5, "outcome": 0}, {"forecast": 0.7, "crowd": 0.995, "outcome": 1}]
+    backed = wallet.backtest(rows)["Back the bot"]
+    assert (backed["bets"], backed["won"]) == (2, 1) and abs(backed["per_bet"] - (1 / 0.51 - 2) / 2) < 1e-9  # the settled price is skipped
 
 
 def test_forecasters_start_from_the_market_price_only_when_asked_to():

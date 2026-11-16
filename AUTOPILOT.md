@@ -150,6 +150,7 @@ public, so none of it is written or printed here.
 | `watch.txt` | Your markets and bets. Edit it on GitHub. A bet is a link, your side, and the price paid: `<link> yes bought=0.32 target=0.45 stop=0.25` |
 | `scorecard.md` | The bot's record on watched markets that have resolved, next to the market price's record, with paper-bet results |
 | `ledger.jsonl` | Every forecast, the price at the time, and the outcome once known |
+| `bets.jsonl` | Every practice bet the betting rules made with fake coins |
 | `alerts/` | What the bot had to tell you. A workflow there files each as an issue that mentions you, so GitHub notifies you |
 
 **What the guidance says, and on what basis.** For a bet you hold:
@@ -178,10 +179,27 @@ one kind of market at a time (price, election, sport, economy, screen, other). O
 watched markets of a kind have resolved, and the bot was clearly closer to the truth on
 them than the price was (a paired test on squared errors, margin 2.5 or more), the bot
 has earned a say on that kind. From then on its view can turn a "Hold" into "Consider
-cashing out" or "Consider cutting the loss", and a new forecast that differs from the
-price by 10 points is flagged "Worth a look". Nothing has to be switched on: the
+cashing out" or "Consider cutting the loss". Nothing has to be switched on: the
 scorecard's "By kind of market" table shows how far each kind is from earning it. If the
 bot never beats the price on a kind, it never gets a say there.
+
+**Practice betting with fake coins (`wallet.py`).** The bot practises betting without
+money. Four betting rules each start with 1,000 fake coins and bet 2% of their spare
+coins, by themselves, on every market the bot forecasts. A bet is bought one point above
+the shown price, as a real buyer would pay, and pays 1 coin a share if it wins.
+
+| Rule | What it does | On 279 resolved questions |
+|---|---|---|
+| Back the bot | Bets the bot's side when it is 10 points from the price | 118 bets, 30 won, 46% lost per coin |
+| Fade the bot | Bets the price's side in those same cases | 118 bets, 88 won, 8% gained per coin, not reliably |
+| Back the favourite | Ignores the bot; buys the side priced 80% to 95% | 90 bets, 80 won, 1% lost per coin |
+| Bot when very sure | Bets the bot's side only under 10% or over 90% | 15 bets, 10 won, 20% lost per coin |
+
+The live wallets are the fair test, because their bets are placed before anyone knows
+the outcome. Each rule's bets, wins and coins are in the scorecard, and every alert ends
+with the four balances. A rule earns a say after 40 settled bets if its gain per bet is
+clearly above zero (a margin of 2.5 or more); from then on its new bets are flagged to
+you as "Worth a look". Until a rule earns that, treat its bets as practice only.
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a

@@ -12,7 +12,8 @@ private market-alerts repository:
 
     watch.txt      the owner's markets and bets (they edit this)
     ledger.jsonl   every forecast, with the market price at the time and, later, the outcome
-    scorecard.md   how the bot has done on the markets that have resolved
+    scorecard.md   how the bot has done on the markets that have resolved, and the fake-coin wallets
+    bets.jsonl     every practice bet the betting rules made with fake coins (see wallet.py)
     alerts/        what to tell the owner after a run; each file becomes a private issue
 """
 
@@ -38,6 +39,7 @@ import bench
 import hooks
 import models
 import tools
+import wallet
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +177,54 @@ def guidance(bet: dict, price: float, forecast: float | None, earned: bool = Fal
     return "hold", f"Hold: {status}, and the bot gives your side {fair:.0%}"
 
 
-def read_ledger() -> list[dict]:
-    path = PRIVATE / "ledger.jsonl"
+def _read(name: str) -> list[dict]:
+    path = PRIVATE / name
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
+
+
+def read_ledger() -> list[dict]:
+    return _read("ledger.jsonl")
+
+
+def practise(ledger: list[dict], prices: dict, settled_now: list[dict], at: str) -> tuple[list[str], list[dict], dict]:
+    """The fake-coin wallets' turn: report what settled, bet on open forecasts, value what is open.
+
+    A rule bets on a market at the price recorded when the bot first forecast it, and only
+    once, so going over every open forecast each time changes nothing for markets already
+    considered. Returns the lines for the owner, the new practice bets, and each rule's
+    standing. No real money or account is involved anywhere.
+    """
+    bets = _read("bets.jsonl")
+    outcomes = {row["id"]: row["outcome"] for row in ledger if "outcome" in row}
+    proven = {name for name, row in wallet.standings(bets, outcomes, {}).items() if row["earned"]}
+    lines = []
+    for outcome in settled_now:
+        mine = [bet for bet in bets if bet["id"] == outcome["id"]]
+        if mine:
+            won = lambda bet: (bet["side"] == "yes") == bool(outcome["outcome"])  # noqa: E731
+            results = [f"{bet['rule']} {'won' if won(bet) else 'lost'} {abs(bet['shares'] - bet['stake'] if won(bet) else bet['stake']):.0f}" for bet in mine]
+            lines.append(f"- Practice result (fake coins): {', '.join(results)}: [{mine[0]['question']}]({mine[0]['url']})")
+    open_forecasts = [row for key, row in _first_forecasts(ledger).items() if key not in outcomes]
+    new = wallet.place(open_forecasts, bets, outcomes, at)
+    for market in open_forecasts:
+        here = [bet for bet in new if bet["id"] == market["id"]]
+        if here:
+            bought = "; ".join(f"{bet['rule']} bought {bet['side'].title()} at {bet['paid']:.0%} for {bet['stake']:.0f}" for bet in here)
+            lines.append(f"- Practice bet (fake coins): {bought}: [{market['question']}]({market['url']})")
+        lines += [
+            f"- Worth a look: the rule \"{bet['rule']}\" has made coins in practice, and it has just bought "
+            f"{bet['side'].title()} at {bet['paid']:.0%}: [{market['question']}]({market['url']})"
+            for bet in here
+            if bet["rule"] in proven
+        ]
+    prices = dict(prices)
+    for bet in bets + new:  # an open bet on a market that has left the watch list still needs today's price
+        if bet["id"] not in outcomes and bet["id"] not in prices:
+            try:
+                prices[bet["id"]] = next((row["price"] for row in tools.polymarket(bet["url"]) if row["id"] == bet["id"]), None)
+            except Exception:
+                prices[bet["id"]] = None  # valued at what it cost
+    return lines, new, wallet.standings(bets + new, outcomes, prices)
 
 
 def _first_forecasts(ledger: list[dict]) -> dict[str, dict]:
@@ -227,7 +274,7 @@ def record(ledger: list[dict]) -> str:
     )
 
 
-def scorecard(ledger: list[dict], problems: list[str]) -> str:
+def scorecard(ledger: list[dict], problems: list[str], wallets: dict | None = None) -> str:
     graded, first = _graded(ledger), _first_forecasts(ledger)
     settled = {row["id"] for row in graded}
     lines = ["# Scorecard", "", f"Markets forecast: {len(first)}. Resolved: {len(graded)}.", "", record(ledger)]
@@ -256,6 +303,20 @@ def scorecard(ledger: list[dict], problems: list[str]) -> str:
         lines += [
             f"- {'Yes' if row['outcome'] else 'No'}: bot {row['forecast']:.0%}, market {row['price']:.0%}. [{row['question']}]({row['url']})"
             for row in graded
+        ]
+    if wallets:
+        lines += [
+            "", "## Practice betting with fake coins", "",
+            f"Each betting rule started with {wallet.START:,.0f} fake coins and bets {wallet.STAKE:.0%} of its spare coins, by itself, "
+            f"on the markets the bot forecasts. No real money is involved. A rule earns a say after {wallet.EARN_BETS} settled "
+            f"bets if its gain per bet is clearly above zero (a margin of {wallet.EARN_T} or more); its new bets are then pointed out to you.",
+            "",
+            "| Rule | Bets | Settled | Won | Gain per coin staked | Margin | Coins now | Earned a say |", "|---|---|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {name} | {row['bets']} | {row['settled']} | {row['won']} | {row['per_bet']:+.0%} | {row['t']:+.1f} | "
+            f"{row['coins']:,.0f} | {'yes' if row['earned'] else 'no'} |"
+            for name, row in wallets.items()
         ]
     lines += ["", "## Still open", ""]
     lines += [
@@ -286,11 +347,6 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
                 "forecast": made[key], "price": row["price"], "closes": row["market_info_close_datetime"],
                 "saw_price": autopilot.ANCHOR,
             })
-            if earned and abs(made[key] - row["price"]) >= EDGE:
-                private.append(
-                    f"- Worth a look: on this kind of market the bot has out-predicted the price, and it now differs "
-                    f"from it (bot {made[key]:.0%}, price {row['price']:.0%}): {link}"
-                )
         state = hooks.load_state(key)
         summary += price_move(link, row["price"], state)
         if bet:  # the owner's bets never reach the public summary
@@ -302,7 +358,8 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
         if tell:
             hooks.save_state(key, state)
     first = _first_forecasts(ledger + fresh)
-    for outcome in settle(ledger + fresh):
+    settled_now = settle(ledger + fresh)
+    for outcome in settled_now:
         fresh.append(outcome)
         row = first[outcome["id"]]
         private.append(
@@ -310,14 +367,20 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
             f"The bot said {row['forecast']:.0%}, the market {row['price']:.0%}"
         )
     ledger += fresh
-    alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private
+    practice, new_bets, wallets = practise(
+        ledger, {row["id"]: row["price"] for row, _ in listed}, settled_now, now.isoformat(timespec="seconds")
+    )
+    alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private + practice
     if tell:
         (PRIVATE / "alerts").mkdir(parents=True, exist_ok=True)
-        with open(PRIVATE / "ledger.jsonl", "a", encoding="utf-8") as out:
-            out.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in fresh)
-        (PRIVATE / "scorecard.md").write_text(scorecard(ledger, problems), encoding="utf-8")
+        for name, entries in (("ledger.jsonl", fresh), ("bets.jsonl", new_bets)):
+            with open(PRIVATE / name, "a", encoding="utf-8") as out:
+                out.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
+        (PRIVATE / "scorecard.md").write_text(scorecard(ledger, problems, wallets), encoding="utf-8")
         if alerts:
-            (PRIVATE / "alerts" / f"{now:%Y%m%dT%H%M%SZ}.md").write_text("\n".join(alerts + ["", record(ledger)]) + "\n", encoding="utf-8")
+            coins = ", ".join(f"{name} {row['coins']:,.0f}" for name, row in wallets.items())
+            foot = ["", record(ledger), f"Fake-coin wallets (each started with {wallet.START:,.0f}): {coins}."]
+            (PRIVATE / "alerts" / f"{now:%Y%m%dT%H%M%SZ}.md").write_text("\n".join(alerts + foot) + "\n", encoding="utf-8")
     return questions, summary
 
 

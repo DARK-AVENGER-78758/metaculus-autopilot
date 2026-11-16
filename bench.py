@@ -42,6 +42,7 @@ import autopilot
 import hooks
 import models
 import tools
+import wallet
 
 BENCH = Path("bench")  # downloads, replayed evidence and results; ignored by git
 DATASETS = "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets"
@@ -348,6 +349,13 @@ def report_text(label: str, sets: list[str] | None = None) -> str:
                 f"- when the bot differed by {margin:.0%} or more: {bets['bets']} bets, {bets['won']} won, "
                 f"{bets['return']:+.0%} on the money staked"
             )
+    priced = [row for row in rows if row.get("source") in BETTABLE and row.get("crowd") is not None]
+    if priced:
+        lines.append("\nBetting rules on these questions (one coin a bet, bought one point above the price; see wallet.py):")
+        lines += [
+            f"- {name}: {row['bets']} bets, {row['won']} won, {row['per_bet']:+.0%} per coin staked (margin {row['t']:+.1f})"
+            for name, row in wallet.backtest(priced).items()
+        ]
     misses = sorted(rows, key=lambda row: -abs(row["forecast"] - row["outcome"]))[:6]
     lines.append("\nLargest misses:")
     for row in misses:
