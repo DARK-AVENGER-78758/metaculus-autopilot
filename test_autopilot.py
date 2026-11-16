@@ -251,11 +251,14 @@ def test_pool_skips_a_retired_model_for_the_rest_of_the_run():
 
 
 def test_pool_waits_out_a_rate_limit_on_the_same_model():
-    replies = iter([Http(429), "second try worked"])
+    replies = iter([Http(429)] * 4 + ["fifth try worked"])
     limited = named("a", lambda prompt: next(replies))
     pool = models.Pool("forecast", [limited, named("b")], width=1)
-    assert asyncio.run(pool.ask("q")) == ("second try worked", "a")
-    assert len(limited.prompts) == 2 and not pool.dead
+    assert asyncio.run(pool.ask("q")) == ("fifth try worked", "a")
+    assert len(limited.prompts) == 5 and not pool.dead
+    throttled = named("a", Http(429))  # still limited after five tries: only then move to the next model
+    assert asyncio.run(models.Pool("forecast", [throttled, named("b", "from b")], width=1).ask("q")) == ("from b", "b")
+    assert len(throttled.prompts) == 5
 
 
 def test_pool_drops_settings_a_model_rejects():

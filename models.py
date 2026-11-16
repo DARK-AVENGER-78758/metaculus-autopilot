@@ -50,7 +50,7 @@ WIDTH = 3  # model families that share the forecasting; the rest are spares
 # at the same time, so each process takes under half. Raise it once `bench.py probe` has
 # measured the real limit.
 REQUESTS_PER_MINUTE = float(os.getenv("REQUESTS_PER_MINUTE") or 18)
-RATE_LIMIT_WAIT = 15  # seconds to wait after a 429; NVIDIA sends no Retry-After header
+RATE_LIMIT_WAIT = 15  # seconds to wait after a first 429, doubling each time; NVIDIA sends no Retry-After header
 TIMEOUT = 300  # seconds of silence allowed on a connection; NVIDIA drops it at about this point
 CALL_LIMIT = 600  # seconds one streamed call may take in total
 STRIKES = 2  # timeouts after which a model is benched for the rest of the run
@@ -164,7 +164,7 @@ class Pool(GeneralLlm):
         return (await self.ask(prompt, system_prompt))[0]
 
     async def _call(self, model: GeneralLlm, prompt: str, system_prompt: str | None) -> str:
-        for attempt in range(3):
+        for attempt in range(5):
             await _limiter().wait_till_able_to_acquire_resources(1)
             started = time.monotonic()
             try:
@@ -174,8 +174,10 @@ class Pool(GeneralLlm):
                     raise ValueError("empty answer")
             except Exception as error:
                 self.calls.append((model.model, type(error).__name__, time.monotonic() - started))
-                if _status(error) == 429 and attempt < 2:
-                    await asyncio.sleep(RATE_LIMIT_WAIT)
+                if _status(error) == 429 and attempt < 4:
+                    # Wait longer each time (15, 30, 60, 120 s): a throttled key recovers in minutes, and
+                    # giving up early cost one exam run 115 of its 182 questions.
+                    await asyncio.sleep(RATE_LIMIT_WAIT * 2**attempt)
                     continue
                 if _status(error) in (400, 422) and any(
                     model.litellm_kwargs.pop(setting, None) is not None for setting in OPTIONAL_SETTINGS
