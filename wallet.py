@@ -1,9 +1,18 @@
-"""Fake-coin wallets: the bot practises betting on real markets without any money.
+"""Fake-coin wallets: the bot practises betting on real markets, as on a real account but without money.
 
-Each betting rule gets its own wallet of START coins and bets by itself on the markets the bot
-forecasts. Nothing here touches a real account or real money. It answers one question: which
-way of betting, if any, would have made coins? A rule that keeps making coins earns the right
-to be pointed out to the owner; see `earned` in standings().
+Each betting rule gets its own wallet of START coins and trades by itself. One coin behaves
+like one dollar on Polymarket: a share costs its live price and pays 1 coin if its side wins,
+nothing if it loses. What is real: the markets, the live price to buy (the ask) and to sell
+(the bid) at the moment of each trade, the outcomes, and the chance of losing a whole stake.
+What is not: the coins, and no order is ever sent anywhere.
+
+On every run each rule looks again at every market it could hold, with the bot's latest
+forecast and the live price. It sells a position it no longer wants (the bot changed its mind,
+or the price moved), may switch to the other side, and buys where it now sees a bet. A rule
+that keeps making coins earns the right to be pointed out to the owner: see `earned`.
+
+Known gaps against a real account: prices are seen only when the bot runs, not tick by tick;
+a small stake is assumed to fill at the best price; trading fees are not charged.
 """
 
 from __future__ import annotations
@@ -12,28 +21,49 @@ import statistics
 
 START = 1000.0  # fake coins each rule starts with
 STAKE = 0.02  # share of a wallet's spare coins put on one bet
-SPREAD = 0.01  # a paper bet pays this much over the shown price and sells this much under it, as a real trader would
+SPREAD = 0.01  # used only when a market reports no live bid and ask: the shown price, give or take this
 GAP = 0.10  # how far the bot must be from the price before a rule treats the two as disagreeing
-EARN_BETS, EARN_T = 40, 2.5  # settled bets, and how clearly above zero the gain per bet must be, before a rule earns a say
+KEEP = 0.02  # a position bought on a disagreement is kept until the gap has shrunk to this
+MAX_OPEN = 25  # positions a rule may hold at once; at 2% each that is half its coins
+MIN_LIQUIDITY = 500.0  # dollars resting in a market's order book before a rule will trade it, when the market says
+MAX_SPREAD = 0.10  # a wider gap between bid and ask means nobody is there to trade with at a fair price
+EARN_BETS, EARN_T = 40, 2.5  # closed bets, and how clearly above zero the gain per bet must be, before a rule earns a say
 
 
-def back_the_bot(forecast: float, price: float) -> str | None:
-    """Bet the bot's side whenever it disagrees with the price."""
-    return "yes" if forecast - price >= GAP else "no" if price - forecast >= GAP else None
+def _lean(edge: float, held: str | None) -> str | None:
+    """Yes when the price is GAP or more below the estimate, No when it is GAP above; a side held is kept down to KEEP."""
+    if held == "yes" and edge > KEEP:
+        return "yes"
+    if held == "no" and edge < -KEEP:
+        return "no"
+    return "yes" if edge >= GAP else "no" if edge <= -GAP else None
 
 
-def fade_the_bot(forecast: float, price: float) -> str | None:
+def back_the_bot(forecast: float, price: float, held: str | None = None) -> str | None:
+    """Bet the bot's side whenever it disagrees with the price; cash out once the price has come to the bot."""
+    return _lean(forecast - price, held)
+
+
+def fade_the_bot(forecast: float, price: float, held: str | None = None) -> str | None:
     """Bet the price's side whenever the bot disagrees with it. On past questions the price usually won."""
-    return {"yes": "no", "no": "yes", None: None}[back_the_bot(forecast, price)]
+    return _lean(price - forecast, held)
 
 
-def back_the_favourite(forecast: float, price: float) -> str | None:
-    """Ignore the bot: buy whichever side is priced between 80% and 95%."""
+def back_the_favourite(forecast: float, price: float, held: str | None = None) -> str | None:
+    """Ignore the bot: buy whichever side is priced 80% to 95%, and sell if it falls under 70%."""
+    if held == "yes" and price >= 0.70:
+        return "yes"
+    if held == "no" and price <= 0.30:
+        return "no"
     return "yes" if 0.80 <= price <= 0.95 else "no" if 0.05 <= price <= 0.20 else None
 
 
-def bot_when_sure(forecast: float, price: float) -> str | None:
-    """Bet the bot's side only where it is very sure, the zone where it has been right nine times in ten."""
+def bot_when_sure(forecast: float, price: float, held: str | None = None) -> str | None:
+    """Bet the bot's side only where it is very sure and the price is 5 points behind; sell if the bot stops being sure."""
+    if held == "yes" and forecast >= 0.8:
+        return "yes"
+    if held == "no" and forecast <= 0.2:
+        return "no"
     if forecast >= 0.9 and forecast - price >= 0.05:
         return "yes"
     return "no" if forecast <= 0.1 and price - forecast >= 0.05 else None
@@ -47,13 +77,21 @@ RULES = {
 }
 
 
-def cost(side: str, price: float) -> float:
-    """What one share of a side costs to buy: its shown price plus the spread. A winning share pays 1 coin."""
-    return min(0.99, (price if side == "yes" else 1 - price) + SPREAD)
+def quotes(market: dict) -> tuple[float, float]:
+    """(bid, ask) for a Yes share: the live order book when the market reports one, else the shown price give or take SPREAD."""
+    bid, ask = market.get("bid"), market.get("ask")
+    if bid is None or ask is None or not 0 <= bid <= ask <= 1:
+        bid, ask = max(0.0, market["price"] - SPREAD), min(1.0, market["price"] + SPREAD)
+    return bid, ask
 
 
-def _won(bet: dict, outcomes: dict) -> bool:
-    return (bet["side"] == "yes") == bool(outcomes[bet["id"]])
+def buy_at(side: str, bid: float, ask: float) -> float:
+    """What a share of a side costs now. A No share costs what a Yes seller would get, taken from 1."""
+    return ask if side == "yes" else 1 - bid
+
+
+def sell_at(side: str, bid: float, ask: float) -> float:
+    return bid if side == "yes" else 1 - ask
 
 
 def _margin(gains: list[float]) -> tuple[float, float]:
@@ -64,64 +102,109 @@ def _margin(gains: list[float]) -> tuple[float, float]:
     return statistics.mean(gains), statistics.mean(gains) / (spread / len(gains) ** 0.5) if spread else 0.0
 
 
-def spare(rule: str, bets: list[dict], outcomes: dict) -> float:
-    """Coins a rule has free: its start, less everything it has staked, plus what its settled bets paid."""
-    mine = [bet for bet in bets if bet["rule"] == rule]
-    paid_out = sum(bet["shares"] for bet in mine if bet["id"] in outcomes and _won(bet, outcomes))
-    return START - sum(bet["stake"] for bet in mine) + paid_out
+def book(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str, dict], list[float]]:
+    """Replay one rule's trades: its spare coins, its open positions by market, and the gain on each closed bet.
+
+    A position still open when its market resolves is paid out: 1 coin a share if its side won.
+    """
+    coins, held, gains = START, {}, []
+    for trade in trades:
+        if trade["rule"] != rule:
+            continue
+        if trade["action"] == "buy":
+            coins -= trade["coins"]
+            held[trade["id"]] = trade
+        else:  # a sale always closes the whole position
+            bought = held.pop(trade["id"])
+            coins += trade["coins"]
+            gains.append(trade["coins"] / bought["coins"] - 1)
+    for key in [key for key in held if key in outcomes]:
+        bought = held.pop(key)
+        paid_out = bought["shares"] * (outcomes[key] if bought["side"] == "yes" else 1 - outcomes[key])
+        coins += paid_out
+        gains.append(paid_out / bought["coins"] - 1)
+    return coins, held, gains
 
 
-def place(markets: list[dict], bets: list[dict], outcomes: dict, at: str) -> list[dict]:
-    """The paper bets each rule now makes on freshly forecast markets. A rule bets once on a market."""
+def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> list[dict]:
+    """What each rule does now: sell what it no longer wants, then buy what it now wants.
+
+    Each market carries the bot's latest `forecast` and the live quote. A sale closes the whole
+    position at the price a seller gets; a purchase pays the price a buyer pays.
+    """
     new = []
-    for name, pick in RULES.items():
-        held = {bet["id"] for bet in bets if bet["rule"] == name}
-        coins = spare(name, bets, outcomes)
+    for name, rule in RULES.items():
+        coins, held, _ = book(name, trades, outcomes)
         for market in markets:
-            side = None if market["id"] in held else pick(market["forecast"], market["price"])
-            stake = round(STAKE * coins, 2)
-            if side and stake >= 1:
-                paid = cost(side, market["price"])
-                new.append({
-                    "rule": name, "id": market["id"], "question": market["question"], "url": market["url"],
-                    "side": side, "paid": paid, "stake": stake, "shares": round(stake / paid, 4), "at": at,
-                })
+            key = market["id"]
+            if key in outcomes or market.get("forecast") is None:
+                continue
+            bid, ask = quotes(market)
+            if ask - bid > MAX_SPREAD:
+                continue  # an empty order book: a real trader could neither buy nor sell here now
+            mid = (bid + ask) / 2
+            side = held[key]["side"] if key in held else None
+            want = rule(market["forecast"], mid, side)
+            seen = {
+                "rule": name, "id": key, "question": market["question"], "url": market["url"], "at": at,
+                "forecast": market["forecast"], "bid": bid, "ask": ask,
+            }
+            if side and want != side:
+                bought = held.pop(key)
+                got = round(bought["shares"] * sell_at(side, bid, ask), 2)
+                new.append({**seen, "action": "sell", "side": side, "price": sell_at(side, bid, ask), "shares": bought["shares"], "coins": got})
+                coins += got
+                side = None
+            stake, thin = round(STAKE * coins, 2), (market.get("liquidity") or MIN_LIQUIDITY) < MIN_LIQUIDITY
+            if want and not side and stake >= 1 and len(held) < MAX_OPEN and not thin and 0.01 <= buy_at(want, bid, ask) <= 0.99:
+                price = buy_at(want, bid, ask)
+                held[key] = {**seen, "action": "buy", "side": want, "price": price, "shares": round(stake / price, 4), "coins": stake}
+                new.append(held[key])
                 coins -= stake
-                held.add(market["id"])
     return new
 
 
-def standings(bets: list[dict], outcomes: dict, prices: dict) -> dict[str, dict]:
-    """Each rule's wallet: bets, results, and its coins with open bets valued at what they would sell for now."""
+def positions(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> list[dict]:
+    """Every open practice position with what it would sell for now. `markets` maps a market id to its live quote."""
+    rows = []
+    for name in RULES:
+        for key, bought in book(name, trades, outcomes)[1].items():
+            now = None  # unknown: valued at cost
+            if key in markets:
+                bid, ask = quotes(markets[key])
+                if ask - bid > MAX_SPREAD:  # no real bid to sell into: use the last shown price instead
+                    bid = ask = markets[key]["price"]
+                now = sell_at(bought["side"], bid, ask)
+            value = bought["coins"] if now is None else bought["shares"] * now
+            rows.append({**bought, "now": now, "value": value, "gain": value / bought["coins"] - 1})
+    return rows
+
+
+def standings(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> dict[str, dict]:
+    """Each rule's wallet: its bets, its results, and its coins with open positions valued at what they would sell for."""
+    open_now = positions(trades, outcomes, markets)
     table = {}
     for name in RULES:
-        mine = [bet for bet in bets if bet["rule"] == name]
-        settled = [bet for bet in mine if bet["id"] in outcomes]
-        gains = [(bet["shares"] if _won(bet, outcomes) else 0.0) / bet["stake"] - 1 for bet in settled]
-        open_value = 0.0
-        for bet in mine:
-            if bet["id"] not in outcomes:
-                price = prices.get(bet["id"])  # unknown: value the bet at what it cost
-                selling = bet["paid"] if price is None else max(0.0, (price if bet["side"] == "yes" else 1 - price) - SPREAD)
-                open_value += bet["shares"] * selling
+        coins, held, gains = book(name, trades, outcomes)
         per_bet, t = _margin(gains)
         table[name] = {
-            "bets": len(mine), "settled": len(settled), "won": sum(gain > 0 for gain in gains),
-            "coins": spare(name, bets, outcomes) + open_value, "per_bet": per_bet, "t": t,
-            "earned": len(settled) >= EARN_BETS and t >= EARN_T,
+            "open": len(held), "closed": len(gains), "won": sum(gain > 0 for gain in gains),
+            "spare": coins, "coins": coins + sum(row["value"] for row in open_now if row["rule"] == name),
+            "per_bet": per_bet, "t": t, "earned": len(gains) >= EARN_BETS and t >= EARN_T,
         }
     return table
 
 
 def backtest(rows: list[dict]) -> dict[str, dict]:
-    """Each rule on resolved questions that had a real-money price: one coin per bet, bought at the price plus the spread."""
+    """Each rule on resolved questions that had a real-money price: one coin a bet, bought SPREAD above the price, held to the end."""
     table = {}
-    for name, pick in RULES.items():
+    for name, rule in RULES.items():
         gains = []
         for row in rows:
-            side = pick(row["forecast"], row["crowd"]) if 0.02 <= row["crowd"] <= 0.98 else None
+            side = rule(row["forecast"], row["crowd"]) if 0.02 <= row["crowd"] <= 0.98 else None
             if side:
-                gains.append(((side == "yes") == bool(row["outcome"])) / cost(side, row["crowd"]) - 1)
+                paid = min(0.99, (row["crowd"] if side == "yes" else 1 - row["crowd"]) + SPREAD)
+                gains.append(((side == "yes") == bool(row["outcome"])) / paid - 1)
         per_bet, t = _margin(gains)
         table[name] = {"bets": len(gains), "won": sum(gain > 0 for gain in gains), "per_bet": per_bet, "t": t}
     return table

@@ -150,7 +150,7 @@ public, so none of it is written or printed here.
 | `watch.txt` | Your markets and bets. Edit it on GitHub. A bet is a link, your side, and the price paid: `<link> yes bought=0.32 target=0.45 stop=0.25` |
 | `scorecard.md` | The bot's record on watched markets that have resolved, next to the market price's record, with paper-bet results |
 | `ledger.jsonl` | Every forecast, the price at the time, and the outcome once known |
-| `bets.jsonl` | Every practice bet the betting rules made with fake coins |
+| `bets.jsonl` | Every practice trade (buy or sell) the betting rules made with fake coins |
 | `alerts/` | What the bot had to tell you. A workflow there files each as an issue that mentions you, so GitHub notifies you |
 
 **What the guidance says, and on what basis.** For a bet you hold:
@@ -183,23 +183,45 @@ cashing out" or "Consider cutting the loss". Nothing has to be switched on: the
 scorecard's "By kind of market" table shows how far each kind is from earning it. If the
 bot never beats the price on a kind, it never gets a say there.
 
-**Practice betting with fake coins (`wallet.py`).** The bot practises betting without
-money. Four betting rules each start with 1,000 fake coins and bet 2% of their spare
-coins, by themselves, on every market the bot forecasts. A bet is bought one point above
-the shown price, as a real buyer would pay, and pays 1 coin a share if it wins.
+**Practice betting with fake coins (`wallet.py`).** The bot practises betting as on a real
+account, without money. Four betting rules each start with 1,000 fake coins and trade by
+themselves. One coin behaves like one dollar on Polymarket.
 
-| Rule | What it does | On 279 resolved questions |
+| | In practice | On a real account |
 |---|---|---|
-| Back the bot | Bets the bot's side when it is 10 points from the price | 118 bets, 30 won, 46% lost per coin |
-| Fade the bot | Bets the price's side in those same cases | 118 bets, 88 won, 8% gained per coin, not reliably |
-| Back the favourite | Ignores the bot; buys the side priced 80% to 95% | 90 bets, 80 won, 1% lost per coin |
-| Bot when very sure | Bets the bot's side only under 10% or over 90% | 15 bets, 10 won, 20% lost per coin |
+| Markets and outcomes | The real ones | The same |
+| Price to buy | The live asking price when the trade is made | The same |
+| Price to sell | The live bid | The same |
+| A winning share | Pays 1 coin | Pays 1 dollar |
+| A losing share | Pays nothing: the stake is lost | The same |
+| A change of mind | The position is sold, and the other side may be bought | The same, if you choose to |
+| Thin markets | Not traded under 500 dollars of resting orders, or with bid and ask 10 points apart | You could, at a bad price |
+| Price updates | Each time the bot runs, every one to four hours | Tick by tick |
+| Size | Small stakes, assumed filled at the best price | Large orders move the price |
+| Fees | Not charged | Charged on some markets |
 
-The live wallets are the fair test, because their bets are placed before anyone knows
-the outcome. Each rule's bets, wins and coins are in the scorecard, and every alert ends
-with the four balances. A rule earns a say after 40 settled bets if its gain per bet is
-clearly above zero (a margin of 2.5 or more); from then on its new bets are flagged to
-you as "Worth a look". Until a rule earns that, treat its bets as practice only.
+On every run each rule looks at every position again, with the bot's latest forecast and
+the live price:
+
+| Rule | Buys | Sells |
+|---|---|---|
+| Back the bot | The bot's side when it is 10 points from the price | When the price has come within 2 points of the bot, or the bot now leans the other way |
+| Fade the bot | The price's side in those same cases | When that disagreement is over, or has reversed |
+| Back the favourite | The side priced 80% to 95%, whatever the bot says | When it falls under 70% |
+| Bot when very sure | The bot's side under 10% or over 90%, if the price is 5 points behind | When the bot is no longer sure |
+
+A rule stakes 2% of its spare coins a bet and holds at most 25 positions. A market with an
+open position is followed until it resolves, so the bot keeps forecasting it and the rule
+can react. Every trade is in `bets.jsonl`; the scorecard shows each wallet, every open
+position with what it would sell for now, and the latest trades. Each alert ends with the
+four balances.
+
+The same rules on 279 resolved questions (bought once and held to the end): Back the bot
+lost 46% per coin, Fade the bot gained 8% but not reliably, Back the favourite lost 1%, Bot
+when very sure lost 20%. The live wallets are the fair test, because their trades are made
+before anyone knows the outcome. A rule earns a say after 40 closed bets if its gain per
+bet is clearly above zero (a margin of 2.5 or more); from then on its new bets are flagged
+to you as "Worth a look". Until a rule earns that, treat its trades as practice only.
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a

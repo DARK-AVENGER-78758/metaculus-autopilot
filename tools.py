@@ -181,8 +181,18 @@ def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:
             "market_info_close_datetime": closes,
             "freeze_datetime": datetime.now(timezone.utc).isoformat(),
             "price": float(prices[0]),
+            # The live order book: what a Yes share sells for and costs right now, and the dollars resting in it.
+            "bid": _or_none(market.get("bestBid")), "ask": _or_none(market.get("bestAsk")),
+            "liquidity": _or_none(market.get("liquidityNum", market.get("liquidity"))),
         })
     return rows
+
+
+def _or_none(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class _Text(HTMLParser):

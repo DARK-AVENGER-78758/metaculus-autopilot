@@ -697,41 +697,73 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     assert [entry.get("forecast", entry.get("outcome")) for entry in ledger] == [0.7, 1] and ledger[0]["price"] == 0.5
     assert "- Forecast: [Will A happen?]" in first_alert and "Cash out: your Yes bet bought at 32% is now 50% (+56%), at your target of 45%" in first_alert
     # The bot said 70% against a price of 50%, so two rules practise on it with fake coins, on opposite sides.
-    assert "Practice bet (fake coins): Back the bot bought Yes at 51% for 20; Fade the bot bought No at 51% for 20" in first_alert
+    assert "Practice wallets (fake coins): 2 bought and 0 sold this run." in first_alert
     assert "Fake-coin wallets (each started with 1,000): Back the bot 999, Fade the bot 999, Back the favourite 1,000" in first_alert
     bets = [json.loads(line) for line in (private / "bets.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [(bet["rule"], bet["side"], bet["stake"]) for bet in bets] == [("Back the bot", "yes", 20.0), ("Fade the bot", "no", 20.0)]
+    assert [(bet["rule"], bet["action"], bet["side"], bet["coins"]) for bet in bets] == [("Back the bot", "buy", "yes", 20.0), ("Fade the bot", "buy", "no", 20.0)]
     assert markets.UNTESTED in first_alert and "bet" not in "\n".join(summary)  # the public page never shows a bet
     alerts = sorted((private / "alerts").iterdir())
     assert len(alerts) == 2 and "Resolved Yes" in alerts[1].read_text(encoding="utf-8") and "bot right 100%" in alerts[1].read_text(encoding="utf-8")
     assert "Practice result (fake coins): Back the bot won 19, Fade the bot lost 20" in alerts[1].read_text(encoding="utf-8")
     assert "Back the bot 1,019, Fade the bot 980" in alerts[1].read_text(encoding="utf-8")
     card = (private / "scorecard.md").read_text(encoding="utf-8")
-    assert "## Practice betting with fake coins" in card and "| Back the bot | 1 | 1 | 1 | +96% |" in card
+    assert "## Practice betting with fake coins" in card and "| Back the bot | 0 | 1 | 1 | +96% |" in card
+    assert "### Latest practice trades" in card and "Back the bot bought 39 Yes at 51¢ for 20 coins (bot 70%, bid 49¢, ask 51¢)" in card
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
 
 
-def test_fake_coin_wallets_bet_by_rule_settle_and_only_a_proven_rule_earns_a_say():
+def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_earn_a_say_only_by_results():
     assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None]
     assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no"]  # a favourite, and the bot is very sure
-    assert wallet.cost("yes", 0.5) == 0.51 and abs(wallet.cost("no", 0.8) - 0.21) < 1e-9 and wallet.cost("yes", 0.995) == 0.99
+    # A position is kept until its reason has gone, not dropped at the first wobble.
+    assert wallet.back_the_bot(0.7, 0.65, held="yes") == "yes" and wallet.back_the_bot(0.7, 0.69, held="yes") is None
+    assert wallet.back_the_bot(0.3, 0.5, held="yes") == "no"  # the bot changed its mind: switch sides
+    assert wallet.back_the_favourite(0.5, 0.75, held="yes") == "yes" and wallet.back_the_favourite(0.5, 0.65, held="yes") is None
 
-    market = lambda n, forecast, price: {"id": f"m{n}", "question": f"Q{n}?", "url": f"https://example.org/{n}", "forecast": forecast, "price": price}  # noqa: E731
-    bets = wallet.place([market(1, 0.7, 0.5), market(2, 0.52, 0.5)], [], {}, "now")
-    assert [(bet["rule"], bet["id"], bet["side"], bet["stake"]) for bet in bets] == [("Back the bot", "m1", "yes", 20.0), ("Fade the bot", "m1", "no", 20.0)]
-    assert wallet.place([market(1, 0.8, 0.5)], bets, {}, "later") == []  # a rule bets once on a market
-    table = wallet.standings(bets, {}, {"m1": 0.6})
-    assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.51 * 0.59, 2)  # an open bet is worth what it would sell for
-    assert round(wallet.standings(bets, {}, {})["Back the bot"]["coins"], 2) == 1000.0  # price unknown: valued at cost
-    table = wallet.standings(bets, {"m1": 1}, {})
-    assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.51, 2) and table["Fade the bot"]["coins"] == 980.0
-    assert (table["Back the bot"]["won"], table["Fade the bot"]["won"], table["Back the bot"]["earned"]) == (1, 0, False)
+    def market(n, forecast, bid, ask, **extra):
+        return {"id": f"m{n}", "question": f"Q{n}?", "url": f"https://example.org/{n}", "forecast": forecast, "price": (bid + ask) / 2, "bid": bid, "ask": ask, **extra}
 
-    # Forty settled bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.
-    run = lambda count, wins: (  # noqa: E731
-        [{"rule": "Back the bot", "id": f"m{n}", "side": "yes", "paid": 0.5, "stake": 10.0, "shares": 20.0} for n in range(count)],
-        {f"m{n}": int(n % 10 < wins) for n in range(count)},
-    )
+    assert wallet.quotes({"price": 0.5}) == (0.49, 0.51) and wallet.quotes(market(1, 0.7, 0.48, 0.52)) == (0.48, 0.52)
+    trades = wallet.trade([market(1, 0.7, 0.48, 0.52), market(2, 0.5, 0.49, 0.51)], [], {}, "t1")
+    assert [(t["rule"], t["id"], t["action"], t["side"], t["price"], t["coins"]) for t in trades] == [
+        ("Back the bot", "m1", "buy", "yes", 0.52, 20.0),  # a buyer pays the ask
+        ("Fade the bot", "m1", "buy", "no", 0.52, 20.0),  # a No share costs 1 minus the Yes bid
+    ]
+    assert wallet.trade([market(1, 0.7, 0.48, 0.52)], trades, {}, "t2") == []  # nothing changed: hold
+    table = wallet.standings(trades, {}, {"m1": market(1, 0.7, 0.58, 0.62)})
+    assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.52 * 0.58, 2)  # open bets are worth what they sell for
+    assert round(wallet.standings(trades, {}, {})["Back the bot"]["coins"], 2) == 1000.0  # no quote: valued at cost
+
+    # The price comes to the bot, so the disagreement is over: both rules sell at what a seller gets.
+    later = wallet.trade([market(1, 0.7, 0.68, 0.70)], trades, {}, "t3")
+    assert [(t["rule"], t["action"], t["side"], round(t["price"], 2)) for t in later] == [
+        ("Back the bot", "sell", "yes", 0.68),  # bought at 52 cents, sold at 68: a profit
+        ("Fade the bot", "sell", "no", 0.30),  # bought at 52 cents, sold at 30: a loss
+    ]
+    assert round(later[0]["coins"], 2) == round(20 / 0.52 * 0.68, 2) and later[1]["coins"] < 20
+    assert wallet.book("Back the bot", trades + later, {})[2][0] > 0 > wallet.book("Fade the bot", trades + later, {})[2][0]
+    # The bot changes its mind instead: each rule sells its side and buys the other one.
+    switched = wallet.trade([market(1, 0.3, 0.48, 0.52)], trades, {}, "t3")
+    assert [(t["rule"], t["action"], t["side"]) for t in switched] == [
+        ("Back the bot", "sell", "yes"), ("Back the bot", "buy", "no"), ("Fade the bot", "sell", "no"), ("Fade the bot", "buy", "yes"),
+    ]
+
+    # Risk of loss: a position held to the end pays 1 a share or nothing. A thin or unquoted market is not traded.
+    coins, held, gains = wallet.book("Back the bot", trades, {"m1": 0})
+    assert coins == 980.0 and not held and gains == [-1.0]
+    coins, _, gains = wallet.book("Back the bot", trades, {"m1": 1})
+    assert round(coins, 2) == round(980 + 20 / 0.52, 2) and round(gains[0], 3) == round(1 / 0.52 - 1, 3)
+    assert wallet.trade([market(3, 0.7, 0.48, 0.52, liquidity=100.0)], [], {}, "t") == []
+    assert wallet.trade([market(4, 0.999, 0.985, 0.995)], [], {}, "t") == []  # nothing to gain above 99 cents
+    empty_book = {**market(1, 0.3, 0.0, 1.0), "price": 0.6}
+    assert wallet.trade([empty_book], trades, {}, "t") == []  # nobody to sell to: the position stays, even though the bot changed its mind
+    assert round(wallet.positions(trades, {}, {"m1": empty_book})[0]["now"], 2) == 0.6  # valued at the last shown price
+
+    # Forty closed bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.
+    def run(count, wins):
+        bought = [{"rule": "Back the bot", "id": f"m{n}", "action": "buy", "side": "yes", "price": 0.5, "coins": 10.0, "shares": 20.0} for n in range(count)]
+        return bought, {f"m{n}": int(n % 10 < wins) for n in range(count)}
+
     assert wallet.standings(*run(40, 8), {})["Back the bot"]["earned"] and not wallet.standings(*run(39, 8), {})["Back the bot"]["earned"]
     assert not wallet.standings(*run(40, 4), {})["Back the bot"]["earned"]
 
