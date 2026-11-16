@@ -12,8 +12,20 @@ on:
       label:
         description: "A name for this setup, so setups can be compared"
         default: "ultra"
+      sources:
+        description: "Only questions from these sources, such as polymarket,kalshi (empty: priced sources first, then the rest)"
+        default: ""
+      also_in:
+        description: "Only questions this other label has already sat, to compare two setups question by question"
+        default: ""
+      anchor:
+        description: "Show the forecasters the market price and have them start from it"
+        type: boolean
+        default: false
   schedule:
-    - cron: "40 1 * * *" # daily: the first run works through the backlog, later runs sit what resolved since
+    # Four chances a day, because GitHub often skips or delays a scheduled run. A run with
+    # nothing left to sit ends in a minute.
+    - cron: "40 1,7,13,19 * * *"
 
 concurrency:
   group: ${{ github.workflow }}
@@ -44,10 +56,19 @@ jobs:
           key: exam-${{ github.run_id }}
           restore-keys: exam-
       - name: Sit the exam
+        # Stops itself before GitHub's limit, so the run ends green with its results kept.
+        # With no sources given it sits the questions that have a market price first.
         run: |
           rm -f bench/*-resolutions.json # outcomes are updated daily, so fetch them again
-          uv run python bench.py run --set all --count ${{ inputs.count || 1000 }} --label "$LABEL"
+          timeout 320m bash -c '
+            uv run python bench.py run --set all --count "$COUNT" --label "$LABEL" --sources "${SOURCES:-polymarket,kalshi}" --also-in "$ALSO_IN"
+            [ -n "$SOURCES" ] || uv run python bench.py run --set all --count "$COUNT" --label "$LABEL" --also-in "$ALSO_IN"
+          ' || [ $? -eq 124 ]
         env:
+          COUNT: ${{ inputs.count || 1000 }}
+          SOURCES: ${{ inputs.sources }}
+          ALSO_IN: ${{ inputs.also_in }}
+          ANCHOR: ${{ inputs.anchor && 'price' || '' }}
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }} # free key from build.nvidia.com
           GITHUB_TOKEN: ${{ github.token }} # only to list the public question sets
           # One fast model keeps a thousand questions inside a single run. The live bot uses three.

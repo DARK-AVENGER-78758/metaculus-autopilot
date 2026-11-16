@@ -27,6 +27,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -169,14 +170,29 @@ def exam_sets() -> list[str]:
     return sorted(name[:10] for name in names if name.endswith("_resolution_set.json") and name[:10] >= EXAM_SINCE)
 
 
-async def sit(count: int, label: str, only: str = "", sets: list[str] | None = None) -> None:
+async def sit(
+    count: int, label: str, only: str = "", sets: list[str] | None = None, sources: tuple[str, ...] = (), also_in: str = ""
+) -> None:
     """Forecast up to `count` exam questions not yet sat, appending each result as soon as it is in.
 
     A question that appears in several sets is sat once, so every result is a different question.
+    `sources` keeps to questions from those sources. `also_in` keeps to questions another
+    setup has already sat, so the two setups can be compared question by question.
     """
     sat = {row["id"] for row in results(label)}
+    paired = {row["id"] for row in results(also_in)} if also_in else None
+    mine, theirs = BENCH / f"state-{label}", BENCH / f"state-{also_in}"
+    if also_in and theirs.exists() and not mine.exists():
+        shutil.copytree(theirs, mine)  # start from the same evidence, so only the setup differs
     for set_date in sets or [EXAM_SET]:
-        rows = [row for row in exam(set_date) if row["id"] not in sat and re.search(only, row["question"], re.I)]
+        rows = [
+            row
+            for row in exam(set_date)
+            if row["id"] not in sat
+            and re.search(only, row["question"], re.I)
+            and (not sources or row["source"] in sources)
+            and (paired is None or row["id"] in paired)
+        ]
         todo = rows[:count]
         if not todo:
             continue
@@ -203,7 +219,8 @@ async def _sit_set(todo: list[dict], label: str, set_date: str) -> None:
     async def one(row: dict) -> None:
         async with slots:
             started = time.monotonic()
-            question = autopilot.as_question(row)
+            # In start-from-the-price mode the forecasters are shown the price on the freeze date.
+            question = autopilot.as_question({**row, "price": row["crowd"]} if autopilot.ANCHOR else row)
             state = hooks.load_state(question.id_of_question)
             try:
                 await autopilot.gather(scout, question, state, autopilot.AS_OF)
@@ -457,6 +474,8 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=12, help="exam questions to sit in this run")
     parser.add_argument("--label", default="baseline", help="a name for this setup, so setups can be compared")
     parser.add_argument("--only", default="", help="sit only questions whose text matches this pattern")
+    parser.add_argument("--sources", default="", help="sit only questions from these sources, such as polymarket,kalshi")
+    parser.add_argument("--also-in", default="", help="sit only questions this other label has already sat")
     parser.add_argument(
         "--set", default=EXAM_SET, help="question set date, several separated by commas, or 'all' for every usable set"
     )
@@ -466,7 +485,8 @@ if __name__ == "__main__":
     if args.command == "probe":
         asyncio.run(probe())
     elif args.command == "run":
-        asyncio.run(sit(args.count, args.label, args.only, exam_sets() if args.set == "all" else args.set.split(",")))
+        sets = exam_sets() if args.set == "all" else args.set.split(",")
+        asyncio.run(sit(args.count, args.label, args.only, sets, tuple(filter(None, args.sources.split(","))), args.also_in))
     elif args.command == "tune":
         print(tune_text(args.label, args.target))
     else:

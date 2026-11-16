@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,9 @@ NEAR_MARKETS = int(os.getenv("NEAR_MARKETS") or 6)  # busiest markets closing wi
 PRICE_MOVE = float(os.getenv("PRICE_MOVE") or 0.1)  # a price change this large is worth telling the owner
 EDGE = 0.1  # the bot's view differs from the price by this much: worth saying, though not worth acting on
 NEARLY_WON = 0.9  # at this price a winning bet has little left to gain, so locking it in is worth a thought
+# The bot earns a say on one kind of market only from its own live record there: at least this
+# many resolved markets, on which it was closer to the truth than the price by this clear a margin.
+EARN_MARKETS, EARN_T = 40, 2.5
 UNTESTED = "No watched market has resolved yet. In tests on past questions the market price was right more often than the bot."
 
 
@@ -114,13 +118,34 @@ def price_move(link: str, price: float, state: dict) -> list[str]:
     return [f"- Price moved from {told:.0%} to {price:.0%}: {link}"] if moved else []
 
 
-def guidance(bet: dict, price: float, forecast: float | None) -> tuple[str, str]:
+def standing(graded: list[dict]) -> dict[str, dict]:
+    """For each kind of market, how the bot has done against the price on the resolved ones.
+
+    `earned` is true once the bot has clearly out-predicted the price on that kind. `t` is the
+    usual paired test on squared errors: how many standard errors closer to the truth the bot
+    was than the price. This is how the lane adapts: trust follows the record, kind by kind.
+    """
+    table = {}
+    for kind in sorted({bench.kind(row["question"]) for row in graded}):
+        part = [row for row in graded if bench.kind(row["question"]) == kind]
+        closer = [(row["price"] - row["outcome"]) ** 2 - (row["forecast"] - row["outcome"]) ** 2 for row in part]
+        spread = statistics.stdev(closer) if len(closer) > 1 else 0.0
+        t = statistics.mean(closer) / (spread / len(closer) ** 0.5) if spread else 0.0
+        table[kind] = {
+            "markets": len(part), "bot": bench.score(part), "price": bench.score(part, "crowd"),
+            "t": t, "earned": len(part) >= EARN_MARKETS and t >= EARN_T,
+        }
+    return table
+
+
+def guidance(bet: dict, price: float, forecast: float | None, earned: bool = False) -> tuple[str, str]:
     """What the bot would do with a bet the owner holds: (kind of advice, the sentence).
 
     The owner's own target and stop come first, then a bet that is nearly won. The bot's own
-    forecast is reported but never turned into "sell" or "switch": on 279 resolved questions
-    with a market price, the price was right 83% of the time when the two disagreed, and
-    mixing any of the bot's forecast into the price made it less accurate.
+    forecast is reported but not turned into "sell" unless it has `earned` a say on this kind
+    of market (see standing). The default follows 279 resolved questions with a market price:
+    the price was right 83% of the time when the two disagreed, and mixing any of the bot's
+    forecast into the price made it less accurate.
     """
     yes = bet["side"] == "yes"
     mine = price if yes else 1 - price  # what the owner's side sells for now
@@ -137,12 +162,17 @@ def guidance(bet: dict, price: float, forecast: float | None) -> tuple[str, str]
     if forecast is None:
         return "hold", f"Hold for now: {status}. The bot has not forecast this market yet"
     fair = forecast if yes else 1 - forecast  # the bot's chance that the owner's side wins
-    if abs(fair - mine) >= EDGE:
+    if earned and fair <= mine - EDGE:
+        return ("cash out" if mine > bet["bought"] else "cut"), (
+            f"Consider {'cashing out' if mine > bet['bought'] else 'cutting the loss'}: {status}. The bot gives your "
+            f"side {fair:.0%}, below the price, and on this kind of market it has out-predicted the price"
+        )
+    if abs(fair - mine) >= EDGE and not earned:
         return "hold", (
             f"Hold: {status}. The bot gives your side {fair:.0%}, but where bot and price have "
             f"disagreed the price has usually been right, so that is no reason to act"
         )
-    return "hold", f"Hold: {status}, and the bot agrees with the price ({fair:.0%})"
+    return "hold", f"Hold: {status}, and the bot gives your side {fair:.0%}"
 
 
 def read_ledger() -> list[dict]:
@@ -211,8 +241,18 @@ def scorecard(ledger: list[dict], problems: list[str]) -> str:
             "",
             f"Paper bets (one unit on the bot's side wherever it differed from the price by 5 points or more): "
             f"{bets['bets']} bets, {bets['won']} won, {bets['return']:+.0%} on the money staked.",
-            "", "## Resolved", "",
+            "", "## By kind of market", "",
+            f"The bot earns a say on a kind after {EARN_MARKETS} resolved markets there, if it was clearly closer to the "
+            f"truth than the price (a margin of {EARN_T} or more). Until then its view is shown but not acted on.",
+            "",
+            "| Kind | Resolved | Bot right | Price right | Bot Brier | Price Brier | Margin | Earned a say |", "|---|---|---|---|---|---|---|---|",
         ]
+        lines += [
+            f"| {kind} | {row['markets']} | {row['bot']['accuracy']:.0%} | {row['price']['accuracy']:.0%} | "
+            f"{row['bot']['brier']:.3f} | {row['price']['brier']:.3f} | {row['t']:+.1f} | {'yes' if row['earned'] else 'no'} |"
+            for kind, row in standing(graded).items()
+        ]
+        lines += ["", "## Resolved", ""]
         lines += [
             f"- {'Yes' if row['outcome'] else 'No'}: bot {row['forecast']:.0%}, market {row['price']:.0%}. [{row['question']}]({row['url']})"
             for row in graded
@@ -235,19 +275,27 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
     reports, summary = asyncio.run(autopilot.run(bot, questions, one_shot=False, record=tell))
     made = {autopilot._key(report.question): report.prediction for report in reports if not isinstance(report, BaseException)}
     ledger, now = read_ledger(), datetime.now(timezone.utc)
+    table = standing(_graded(ledger))
     fresh, private = [], []
     for (row, bet), question in zip(listed, questions):
         key, link = autopilot._key(question), f"[{row['question']}]({row['url']})"
+        earned = table.get(bench.kind(row["question"]), {}).get("earned", False)
         if key in made:
             fresh.append({
                 "id": row["id"], "question": row["question"], "url": row["url"], "at": now.isoformat(timespec="seconds"),
                 "forecast": made[key], "price": row["price"], "closes": row["market_info_close_datetime"],
+                "saw_price": autopilot.ANCHOR,
             })
+            if earned and abs(made[key] - row["price"]) >= EDGE:
+                private.append(
+                    f"- Worth a look: on this kind of market the bot has out-predicted the price, and it now differs "
+                    f"from it (bot {made[key]:.0%}, price {row['price']:.0%}): {link}"
+                )
         state = hooks.load_state(key)
         summary += price_move(link, row["price"], state)
         if bet:  # the owner's bets never reach the public summary
             latest = next((entry["forecast"] for entry in reversed(ledger + fresh) if entry["id"] == row["id"] and "forecast" in entry), None)
-            kind, advice = guidance(bet, row["price"], latest)
+            kind, advice = guidance(bet, row["price"], latest, earned)
             if kind != state.get("advice"):
                 state["advice"] = kind
                 private.append(f"- {advice}: {link}")

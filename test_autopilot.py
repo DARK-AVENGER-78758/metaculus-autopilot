@@ -644,7 +644,23 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     kind, advice = markets.guidance(bet, 0.40, 0.25)
     assert kind == "hold" and "is now 40% (+25%)" in advice and "The bot gives your side 25%" in advice and "no reason to act" in advice
     assert markets.guidance(bet, 0.30, 0.15)[0] == "hold" and markets.guidance(bet, 0.30, None)[0] == "hold"
-    assert markets.guidance(bet, 0.40, 0.45)[1].endswith("the bot agrees with the price (45%)")
+    assert markets.guidance(bet, 0.40, 0.45)[1].endswith("and the bot gives your side 45%")
+    # Once the bot has earned a say on this kind of market, its view does turn into advice.
+    kind, advice = markets.guidance(bet, 0.40, 0.25, earned=True)
+    assert kind == "cash out" and "it has out-predicted the price" in advice
+    assert markets.guidance(bet, 0.30, 0.15, earned=True)[0] == "cut" and markets.guidance(bet, 0.40, 0.6, earned=True)[0] == "hold"
+
+    # Trust is earned kind by kind from resolved markets: enough of them, and clearly closer to the truth than the price.
+    def resolved(count, sure, question="Will the bill pass?"):
+        return [
+            {"question": question, "price": 0.5, "crowd": 0.5, "outcome": n % 2, "forecast": (sure if n % 2 else 1 - sure) + 0.01 * (n % 3)}
+            for n in range(count)
+        ]
+
+    table = markets.standing(resolved(40, 0.9) + resolved(39, 0.9, "Will the stock rise?") + resolved(40, 0.2, "Will the team win the league?"))
+    assert table["other"]["earned"] and table["other"]["markets"] == 40 and table["other"]["t"] > 2.5
+    assert not table["price"]["earned"] and table["price"]["t"] > 2.5  # one market short
+    assert not table["sport"]["earned"] and table["sport"]["t"] < 0  # the price was closer
     held_no = {"side": "no", "bought": 0.4}  # a No bet gains when the Yes price falls
     assert "is now 70% (+75%)" in markets.guidance(held_no, 0.30, 0.3)[1] and markets.guidance(held_no, 0.30, 0.6)[0] == "hold"
     kind, advice = markets.guidance(held_no, 0.08, 0.5)  # nearly won: little left to gain
@@ -681,6 +697,31 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     assert len(alerts) == 2 and "Resolved Yes" in alerts[1].read_text(encoding="utf-8") and "bot right 100%" in alerts[1].read_text(encoding="utf-8")
     card = (private / "scorecard.md").read_text(encoding="utf-8")
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
+
+
+def test_forecasters_start_from_the_market_price_only_when_asked_to():
+    priced = make_question(community_prediction_at_access_time=0.84)
+    assert "The market price" not in asyncio.run(make_bot().run_research(priced))
+    with setting(autopilot, "ANCHOR", True):
+        briefing = asyncio.run(make_bot().run_research(priced))
+        assert briefing.startswith("## The market price") and "price Yes at 84%" in briefing
+        assert "The market price" not in asyncio.run(make_bot().run_research(make_question()))  # no price, no note
+
+
+def test_exam_can_keep_to_some_sources_and_to_questions_another_setup_sat():
+    rows = [{"id": str(n), "source": source, "question": f"Q{n}?"} for n, source in enumerate(["polymarket", "metaculus", "kalshi", "polymarket"])]
+    sat_by = {"new": [], "old": [{"id": "0"}, {"id": "1"}]}
+    taken = []
+
+    async def fake_sit_set(todo, label, set_date):
+        taken.append([row["id"] for row in todo])
+
+    with setting(bench, "exam", lambda set_date=None: rows), setting(bench, "results", lambda label: sat_by[label]):
+        with setting(bench, "_sit_set", fake_sit_set):
+            asyncio.run(bench.sit(10, "new", sources=("polymarket", "kalshi")))
+            asyncio.run(bench.sit(10, "new", also_in="old"))
+            asyncio.run(bench.sit(10, "new", sources=("polymarket",), also_in="old"))
+    assert taken == [["0", "2", "3"], ["0", "1"], ["0"]]
 
 
 def test_a_question_is_followed_more_closely_as_its_end_nears():

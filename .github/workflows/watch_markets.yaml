@@ -14,7 +14,9 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "17 * * * *" # hourly; a market closing soon is looked at every time, a distant one twice a day
+    # Three chances an hour, because GitHub often skips or delays a scheduled run. A market
+        # closing soon is looked at every time, a distant one twice a day; a run with nothing due is short.
+    - cron: "7,27,47 * * * *"
 
 concurrency:
   group: ${{ github.workflow }}

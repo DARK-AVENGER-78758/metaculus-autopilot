@@ -118,8 +118,10 @@ the market's price. The same thing from a terminal:
 
 ### Watching Polymarket markets (`markets.py`)
 
-The **Watch Polymarket markets** workflow runs every hour with nobody at the keyboard. It
-places no bets: it watches, forecasts, keeps score and tells you what it would do.
+The **Watch Polymarket markets** workflow is scheduled three times an hour with nobody at
+the keyboard. GitHub runs scheduled jobs when it has room and skips many of them, so in
+practice it runs every one to four hours. It places no bets: it watches, forecasts,
+keeps score and tells you what it would do.
 
 | Step | What happens |
 |---|---|
@@ -170,6 +172,16 @@ is what the test on resolved questions says to do. On 279 questions with a marke
 | Mixing the bot's forecast into the price | Every mix was less accurate than the price alone |
 | Paper bets on the bot's side at a 10-point gap | 118 bets, 30 won, 44% of the stake lost |
 | Paper bets by kind of question and by source | A loss in every group |
+
+**How the bot earns a say (this is how the lane adapts).** Trust follows the live record,
+one kind of market at a time (price, election, sport, economy, screen, other). Once 40
+watched markets of a kind have resolved, and the bot was clearly closer to the truth on
+them than the price was (a paired test on squared errors, margin 2.5 or more), the bot
+has earned a say on that kind. From then on its view can turn a "Hold" into "Consider
+cashing out" or "Consider cutting the loss", and a new forecast that differs from the
+price by 10 points is flagged "Worth a look". Nothing has to be switched on: the
+scorecard's "By kind of market" table shows how far each kind is from earning it. If the
+bot never beats the price on a kind, it never gets a say there.
 
 **Why it does not bet.** Real-money prediction markets are banned where the owner lives,
 and Polymarket does not allow trading through a VPN. The evidence also says not to: in a
@@ -287,6 +299,19 @@ in the same half.
   there earns nothing.
 - **Its worst misses** are confident answers to questions about a current standing (who
   leads a statistic, a film's review score) that it could not look up in a replay.
+
+### Next experiment: starting from the price
+
+So far the forecasters never saw the market price, and their own estimates added nothing
+to it. With `ANCHOR=price` they are shown the price and told to start from it, moving
+only for specific evidence traders may not have acted on. The exam workflow can sit the
+same priced questions again this way (inputs: label `anchored`, also_in `ultra`, anchor
+on), reusing the same evidence, so the two setups are compared question by question.
+The test is whether the anchored forecast beats the price itself. If it does not, the
+price remains the best forecast available for these markets.
+
+The exam is scheduled four times a day and sits questions that have a market price
+first, so Polymarket and Kalshi results build up fastest.
 
 ## Two things to decide before the prize tournament
 
