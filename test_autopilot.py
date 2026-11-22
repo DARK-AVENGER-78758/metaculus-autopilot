@@ -714,8 +714,8 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
 
 
 def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_earn_a_say_only_by_results():
-    assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None]
-    assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no"]  # a favourite, and the bot is very sure
+    assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None, "yes"]
+    assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no", None]  # a favourite, and the bot is very sure
     # A position is kept until its reason has gone, not dropped at the first wobble.
     assert wallet.back_the_bot(0.7, 0.65, held="yes") == "yes" and wallet.back_the_bot(0.7, 0.69, held="yes") is None
     assert wallet.back_the_bot(0.3, 0.5, held="yes") == "no"  # the bot changed its mind: switch sides
@@ -748,6 +748,11 @@ def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_ear
     assert [(t["rule"], t["action"], t["side"]) for t in switched] == [
         ("Back the bot", "sell", "yes"), ("Back the bot", "buy", "no"), ("Fade the bot", "sell", "no"), ("Fade the bot", "buy", "yes"),
     ]
+
+    # A wallet limited to one kind of market opens bets there and nowhere else.
+    kinds = wallet.trade([market(6, 0.7, 0.48, 0.52, kind="price"), market(7, 0.7, 0.48, 0.52, kind="other")], [], {}, "t")
+    assert [t["id"] for t in kinds if t["rule"] == "Bot on price markets"] == ["m6"]
+    assert [t["id"] for t in kinds if t["rule"] == "Back the bot"] == ["m6", "m7"]
 
     # Risk of loss: a position held to the end pays 1 a share or nothing. A thin or unquoted market is not traded.
     coins, held, gains = wallet.book("Back the bot", trades, {"m1": 0})

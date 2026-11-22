@@ -228,7 +228,7 @@ def practise(
                 row = next(fresh for fresh in tools.polymarket(row["url"]) if fresh["id"] == row["id"])
             except Exception:
                 pass
-            live[row["id"]] = {**row, "forecast": opinion[row["id"]]}
+            live[row["id"]] = {**row, "forecast": opinion[row["id"]], "kind": bench.kind(row["question"])}
     new = wallet.trade(list(live.values()), trades, outcomes, at)
     if new:
         bought = sum(trade["action"] == "buy" for trade in new)
@@ -451,6 +451,24 @@ def settle_check(count: int = 25) -> str:
         agree += read == row["outcome"]
         if read != row["outcome"]:
             lines.append(f"- read {read}, known {row['outcome']}: {row['question'][:90]}")
+    # What Polymarket publishes about the cost and depth of a trade, to see how close the practice account can get.
+    try:
+        listing = f"{tools.GAMMA}/markets?closed=false&active=true&order=volume24hr&ascending=false&limit=1"
+        raw = json.loads(tools.fetch(listing, 2_000_000)[1])[0]
+        wanted = ("fee", "tick", "minimum", "minsize", "spread", "rewards", "negrisk", "accepting")
+        lines.append("\nFields on a market that bear on the cost of a trade:")
+        lines += [f"- {key}: {str(raw[key])[:80]}" for key in sorted(raw) if any(word in key.lower() for word in wanted)]
+        token = tools._listed(raw.get("clobTokenIds"))[0]
+        book = json.loads(tools.fetch(f"https://clob.polymarket.com/book?token_id={token}", 2_000_000)[1])
+        best = lambda side, pick: pick(float(level["price"]) for level in book[side]) if book.get(side) else None  # noqa: E731
+        depth = lambda side: sum(float(level["size"]) for level in book.get(side) or [])  # noqa: E731
+        lines.append(
+            f"- order book: {len(book.get('bids') or [])} bid levels (best {best('bids', max)}, {depth('bids'):,.0f} shares), "
+            f"{len(book.get('asks') or [])} ask levels (best {best('asks', min)}, {depth('asks'):,.0f} shares); "
+            f"other fields: {sorted(key for key in book if key not in ('bids', 'asks'))}"
+        )
+    except Exception as error:
+        lines.append(f"\nCould not read the fee and order-book details: {type(error).__name__}: {str(error)[:120]}")
     lines.append("\nLive quotes on the busiest markets (the practice wallets trade at these):")
     lines += [
         f"- bid {row['bid']}, ask {row['ask']}, shown price {row['price']}, liquidity {row['liquidity']}: {row['question'][:70]}"

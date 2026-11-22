@@ -354,7 +354,7 @@ def report_text(label: str, sets: list[str] | None = None) -> str:
         lines.append("\nBetting rules on these questions (one coin a bet, bought one point above the price; see wallet.py):")
         lines += [
             f"- {name}: {row['bets']} bets, {row['won']} won, {row['per_bet']:+.0%} per coin staked (margin {row['t']:+.1f})"
-            for name, row in wallet.backtest(priced).items()
+            for name, row in wallet.backtest([{**row, "kind": kind(row["question"])} for row in priced]).items()
         ]
     misses = sorted(rows, key=lambda row: -abs(row["forecast"] - row["outcome"]))[:6]
     lines.append("\nLargest misses:")

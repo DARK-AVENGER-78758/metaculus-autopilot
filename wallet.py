@@ -84,7 +84,12 @@ RULES = {
     "Fade the bot": fade_the_bot,
     "Back the favourite": back_the_favourite,
     "Bot when very sure": bot_when_sure,
+    # Added 2026-11-22 with a fresh 1,000 coins, as a test of the one pattern the first live week
+    # suggested: backing the bot paid on price markets (65 closed bets, +27% a bet, not yet a
+    # clear margin) and lost on every other kind. Only bets made from now on can prove it.
+    "Bot on price markets": back_the_bot,
 }
+ONLY = {"Bot on price markets": "price"}  # a wallet that opens bets on one kind of market only
 
 
 WALLETS = [*RULES, LEARNER]
@@ -172,6 +177,9 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
             mid = (bid + ask) / 2
             side = held[key]["side"] if key in held else None
             want = rule(market["forecast"], mid, side)
+            scope = ONLY.get(followed if name == LEARNER else name)
+            if scope and not side and market.get("kind") != scope:
+                want = None  # not this wallet's kind of market
             seen = {
                 "rule": name, "id": key, "question": market["question"], "url": market["url"], "at": at,
                 "forecast": market["forecast"], "bid": bid, "ask": ask, "rules": RULES_VERSION,
@@ -317,6 +325,8 @@ def backtest(rows: list[dict]) -> dict[str, dict]:
     for name, rule in RULES.items():
         gains = []
         for row in rows:
+            if name in ONLY and row.get("kind") != ONLY[name]:
+                continue
             side = rule(row["forecast"], row["crowd"]) if 0.02 <= row["crowd"] <= 0.98 else None
             if side:
                 paid = min(0.99, (row["crowd"] if side == "yes" else 1 - row["crowd"]) + SPREAD)
