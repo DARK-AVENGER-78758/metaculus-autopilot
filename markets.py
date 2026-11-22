@@ -26,7 +26,7 @@ import logging
 import os
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -239,7 +239,9 @@ def practise(
         for trade in new
         if trade["action"] == "buy" and trade["rule"] in proven
     ]
-    broken = wallet.audit(trades + new, outcomes, {row["id"]: row["settled_at"] for row in ledger if "outcome" in row})
+    # Results noted before runs were stamped: the run began a few minutes before its results were written down.
+    early = lambda row: (datetime.fromisoformat(row["settled_at"]) - timedelta(minutes=5)).isoformat()  # noqa: E731
+    broken = wallet.audit(trades + new, outcomes, {row["id"]: row.get("run") or early(row) for row in ledger if "outcome" in row})
     if broken:
         lines.append(f"- The referee found {len(broken)} practice trades that broke the rules. They are listed in the scorecard.")
     return lines, new, wallet.standings(trades + new, outcomes, live), wallet.positions(trades + new, outcomes, live), broken
@@ -254,8 +256,12 @@ def _first_forecasts(ledger: list[dict]) -> dict[str, dict]:
     return first
 
 
-def settle(ledger: list[dict]) -> list[dict]:
-    """An outcome record for each forecast market that has resolved since the last look."""
+def settle(ledger: list[dict], at: str) -> list[dict]:
+    """An outcome record for each forecast market that has resolved since the last look.
+
+    `run` is the stamp this run puts on its trades, so the referee can tell exactly which
+    trades were made knowing the result.
+    """
     done = {row["id"] for row in ledger if "outcome" in row}
     found = []
     for key in _first_forecasts(ledger):
@@ -267,7 +273,7 @@ def settle(ledger: list[dict]) -> list[dict]:
             logger.warning(f"Could not check whether {key} has resolved: {type(error).__name__}")
             continue
         if outcome is not None:
-            found.append({"id": key, "outcome": outcome, "settled_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            found.append({"id": key, "outcome": outcome, "settled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "run": at})
     return found
 
 
@@ -407,7 +413,7 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
         if tell:
             hooks.save_state(key, state)
     first = _first_forecasts(ledger + fresh)
-    settled_now = settle(ledger + fresh)
+    settled_now = settle(ledger + fresh, now.isoformat(timespec="seconds"))
     for outcome in settled_now:
         fresh.append(outcome)
         row = first[outcome["id"]]

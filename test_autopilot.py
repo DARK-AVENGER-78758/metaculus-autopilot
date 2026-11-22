@@ -767,6 +767,11 @@ def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_ear
     greedy = [{**trades[0], "coins": 500.0, "shares": round(500 / 0.52, 4)}]  # a stake of half the wallet
     assert "more than 2% of its 1000.00 spare coins" in wallet.audit(greedy, {})[0]
     assert "after the market's result was known" in wallet.audit(trades, {"m1": 1}, {"m1": "t0"})[0]
+    # A wallet is paid when its market resolves, so later stakes are judged against the coins it then has.
+    paid = wallet.book("Back the bot", trades, {"m1": 1})[0]  # 980 spare plus the payout
+    after = [{**trades[0], "id": "m5", "at": "t5", "coins": round(0.02 * paid, 2), "shares": round(round(0.02 * paid, 2) / 0.52, 4)}]
+    assert wallet.audit(trades[:1] + after, {"m1": 1}, {"m1": "t2"}) == []  # 2% of the larger wallet is within the limit
+    assert "more than 2%" in wallet.audit(trades[:1] + after, {}, {})[0]  # without the win it would not be
     assert "sold a position it did not hold" in wallet.audit(later, {})[0]
 
     # Forty closed bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.

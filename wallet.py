@@ -23,6 +23,7 @@ has to change, RULES_VERSION goes up and every wallet starts again from START.
 from __future__ import annotations
 
 import statistics
+from datetime import datetime
 
 START = 1000.0  # fake coins each rule starts with
 STAKE = 0.02  # share of a wallet's spare coins put on one bet
@@ -222,23 +223,39 @@ def standings(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> d
     return table
 
 
-def audit(trades: list[dict], outcomes: dict, settled_at: dict | None = None) -> list[str]:
+def audit(trades: list[dict], outcomes: dict, known_from: dict | None = None) -> list[str]:
     """The referee: replay every trade and list each one that broke the practice account's rules.
 
     An empty list means a clean log: every purchase at the live asking price, every sale at
     the live bid, no stake above STAKE of the spare coins, no trade on a market whose result
-    was already known, and every wallet's coins adding up.
+    was already known, and every wallet's coins adding up to what `book` says it has.
+
+    `known_from` maps a resolved market to the time of the run that learned its result. A
+    position still open then is paid out at that moment, exactly as `book` does, so the coins
+    and the position count the stake limit is judged against are the ones the wallet really had.
     """
     problems, coins, held = [], {name: START for name in WALLETS}, {name: {} for name in WALLETS}
+    results = sorted((when, key) for key, when in (known_from or {}).items() if key in outcomes)
+
+    def pay_out(until: str | None) -> None:
+        """Settle every market whose result was known by `until` (all of them, if None)."""
+        while results and (until is None or _by(results[0][0], until)):
+            _, key = results.pop(0)
+            for name in WALLETS:
+                bought = held[name].pop(key, None)
+                if bought:
+                    coins[name] += bought["shares"] * (outcomes[key] if bought["side"] == "yes" else 1 - outcomes[key])
+
     for number, trade in enumerate(trades, 1):
         name, key = trade.get("rule"), trade.get("id")
         flag = lambda what: problems.append(f"Trade {number} ({name}, {str(trade.get('at'))[:16]}): {what}")  # noqa: E731
+        pay_out(str(trade.get("at")))
         if name not in coins:
             flag("made by a wallet that does not exist")
             continue
         if trade.get("rules", RULES_VERSION) != RULES_VERSION:
             flag(f"made under rules version {trade.get('rules')}, not {RULES_VERSION}")
-        if settled_at and key in settled_at and str(trade.get("at")) > settled_at[key]:
+        if known_from and key in known_from and not _by(str(trade.get("at")), known_from[key]):
             flag("made after the market's result was known")
         bid, ask = trade["bid"], trade["ask"]
         if ask - bid > MAX_SPREAD:
@@ -266,7 +283,19 @@ def audit(trades: list[dict], outcomes: dict, settled_at: dict | None = None) ->
             if abs(trade["coins"] - bought["shares"] * trade["price"]) > 0.01:
                 flag("its shares, price and coins do not add up")
             coins[name] += trade["coins"]
+    pay_out(None)
+    for name in WALLETS if known_from is not None else []:  # the replay and the wallet's own books must agree
+        if abs(coins[name] - book(name, trades, outcomes)[0]) > 0.01 * max(1, len(trades)):
+            problems.append(f"{name}: the replay ends with {coins[name]:.2f} spare coins, its own books say {book(name, trades, outcomes)[0]:.2f}")
     return problems
+
+
+def _by(earlier: str, later: str) -> bool:
+    """Is the first moment at or before the second?"""
+    try:
+        return datetime.fromisoformat(earlier) <= datetime.fromisoformat(later)
+    except ValueError:
+        return earlier <= later
 
 
 def course(row: dict) -> str:
