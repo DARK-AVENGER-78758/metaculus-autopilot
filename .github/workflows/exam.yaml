@@ -35,9 +35,21 @@ jobs:
   exam:
     runs-on: ubuntu-latest
     timeout-minutes: 350 # GitHub stops a job at 360; results sat so far are kept either way
+    permissions:
+      contents: read
+      actions: write # only for the first step: restarting the market watch
     env:
       LABEL: ${{ inputs.label || 'ultra' }}
     steps:
+      # A second safety net for the market watch, which starts its own next run. If that chain has
+      # stopped (a run timed out, or GitHub had an outage), this starts it again.
+      - name: Restart the market watch if its chain has stopped
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          active=$(gh run list -R "$GITHUB_REPOSITORY" --workflow watch_markets.yaml --limit 20 --json status --jq '[.[] | select(.status != "completed")] | length')
+          if [ "$active" -eq 0 ]; then gh workflow run watch_markets.yaml -R "$GITHUB_REPOSITORY"; fi
       - name: Check out repository
         uses: actions/checkout@v4
       - uses: actions/setup-python@v5
