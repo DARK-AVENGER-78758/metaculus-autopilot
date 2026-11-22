@@ -214,6 +214,9 @@ the live price:
 | Back the favourite | The side priced 80% to 95%, whatever the bot says | Never: held until the market resolves |
 | Bot when very sure | The bot's side under 10% or over 90%, if the price is 5 points behind | When the bot is no longer sure |
 | Bot on price markets | As Back the bot, but only on price markets (crypto, oil and the like) | As Back the bot |
+| Late favourite | With two days or less to go, the side priced 90% to 98%, whatever the bot says | Never |
+| Follow the move | The side the price has moved towards by 10 points since the bot first looked | Never |
+| Fade the move | The side it has moved away from, expecting it to come back | Never |
 
 **The goal and the referee.** The owner's goal is to turn 1,000 fake coins into 5,000 by
 winning bets, and in no other way. Three things keep that honest:
@@ -266,6 +269,24 @@ wallet, "Bot on price markets", and only bets made from now on can prove it.
 The referee itself was wrong for that week: it forgot to pay a wallet out when its
 market resolved, so it reported hundreds of false alarms. It now settles each market at
 the run that learned the result and checks its replay against the wallet's own books.
+
+**The daily assessment, and no need to step in.** Once a day, on the first run after
+midnight UTC, the bot judges the day before and files one message, "Daily assessment",
+in the private repository:
+
+- bets placed (the target is at least 10 a day) and bets closed, with how many made coins;
+- whether any wallet is above its 1,000 starting coins, and each wallet's change over the day;
+- how the bot's forecasts did against the price on markets that resolved that day;
+- what the self-trained wallet currently believes, and the referee's verdict.
+
+If fewer than 10 bets were placed, the bot widens its own intake: it watches four more
+near-term markets from then on (up to 30), and narrows again if bets run far above the
+target. Nothing needs setting by hand.
+
+Other messages are now rare. A run sends one of its own only when something concerns a
+bet you listed (cash out, cut the loss, hold), when a rule that has proved itself places
+a bet, or when the referee finds a problem. Forecasts, price moves and practice trades
+are in the scorecard and summed up in the daily assessment.
 
 **Self-training.** Nothing here retrains the language models; they are hosted and fixed.
 What trains itself, on every run and with nobody choosing, is how the bot bets:

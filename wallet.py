@@ -58,22 +58,43 @@ def _lean(edge: float, held: str | None) -> str | None:
     return "yes" if edge >= GAP else "no" if edge <= -GAP else None
 
 
-def back_the_bot(forecast: float, price: float, held: str | None = None) -> str | None:
+def back_the_bot(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
     """Bet the bot's side whenever it disagrees with the price; cash out once the price has come to the bot."""
     return _lean(forecast - price, held)
 
 
-def fade_the_bot(forecast: float, price: float, held: str | None = None) -> str | None:
+def fade_the_bot(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
     """Bet the price's side whenever the bot disagrees with it, and hold it to the end. On past questions the price usually won."""
     return held or _lean(price - forecast, None)
 
 
-def back_the_favourite(forecast: float, price: float, held: str | None = None) -> str | None:
+def back_the_favourite(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
     """Ignore the bot: buy whichever side is priced 80% to 95%, and hold it to the end."""
     return held or ("yes" if 0.80 <= price <= 0.95 else "no" if 0.05 <= price <= 0.20 else None)
 
 
-def bot_when_sure(forecast: float, price: float, held: str | None = None) -> str | None:
+def late_favourite(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
+    """Ignore the bot: with two days or less to go, buy the side priced 90% to 98% and hold it to the end."""
+    days = (market or {}).get("days_left")
+    if held or days is None or days > 2:
+        return held
+    return "yes" if 0.90 <= price <= 0.98 else "no" if 0.02 <= price <= 0.10 else None
+
+
+def follow_the_move(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
+    """Ignore the bot's forecast: buy the side the price has moved towards by GAP since the bot first looked, and hold it."""
+    seen = (market or {}).get("seen_price")
+    if held or seen is None:
+        return held
+    return "yes" if price - seen >= GAP else "no" if seen - price >= GAP else None
+
+
+def fade_the_move(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
+    """The opposite bet: buy the side the price has moved away from, expecting it to come back, and hold it."""
+    return held or {"yes": "no", "no": "yes", None: None}[follow_the_move(forecast, price, None, market)]
+
+
+def bot_when_sure(forecast: float, price: float, held: str | None = None, market: dict | None = None) -> str | None:
     """Bet the bot's side only where it is very sure and the price is 5 points behind; sell if the bot stops being sure."""
     if held == "yes" and forecast >= 0.8:
         return "yes"
@@ -93,6 +114,11 @@ RULES = {
     # suggested: backing the bot paid on price markets (65 closed bets, +27% a bet, not yet a
     # clear margin) and lost on every other kind. Only bets made from now on can prove it.
     "Bot on price markets": back_the_bot,
+    # Added 2026-11-22 with a fresh 1,000 coins each, so the self-trained wallet has more ways of betting to
+    # learn from. None uses the bot's forecast: they are here in case the price alone can be bet on.
+    "Late favourite": late_favourite,
+    "Follow the move": follow_the_move,
+    "Fade the move": fade_the_move,
 }
 ONLY = {"Bot on price markets": "price"}  # a wallet that opens bets on one kind of market only
 
@@ -214,7 +240,7 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
     """
     new = []
     followed = leader(trades, outcomes)
-    keep = lambda forecast, price, held=None: held  # noqa: E731  no rule to follow yet: hold what it has, buy nothing
+    keep = lambda forecast, price, held=None, market=None: held  # noqa: E731  no rule to follow yet: hold, buy nothing
     live = {market["id"]: market for market in markets}
     learned = {kind: lesson["rule"] for kind, lesson in lessons(trades, outcomes).items() if lesson["follow"]}
     for name in WALLETS:
@@ -232,7 +258,8 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
             # Whose rule this wallet uses here: its own, the leader's, or the one its record has taught it for this kind.
             source = {LEARNER: followed, SELF: learned.get(market.get("kind"))}.get(name, name)
             rule = RULES[source] if source else keep
-            want = rule(market["forecast"], mid, side)
+            days = _days_left(market, at)
+            want = rule(market["forecast"], mid, side, {**market, "days_left": days})
             scope = ONLY.get(source)
             if scope and not side and market.get("kind") != scope:
                 want = None  # not this wallet's kind of market
@@ -251,7 +278,6 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
                 coins += got
                 side = None
             stake, thin = round(STAKE * coins, 2), (market.get("liquidity") or MIN_LIQUIDITY) < MIN_LIQUIDITY
-            days = _days_left(market, at)
             buying = want and not side and worth < GOAL  # a wallet that has reached the goal opens nothing new
             buying = buying and days is not None and days <= MAX_DAYS  # coins must come back in time to be bet again
             if buying and stake >= 1 and len(held) < MAX_OPEN and not thin and 0.01 <= buy_at(want, bid, ask) <= 0.99:

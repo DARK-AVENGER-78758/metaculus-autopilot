@@ -695,17 +695,17 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
                 markets.watch(make_bot(), tell=True)
     ledger = [json.loads(line) for line in (private / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [entry.get("forecast", entry.get("outcome")) for entry in ledger] == [0.7, 1] and ledger[0]["price"] == 0.5
-    assert "- Forecast: [Will A happen?]" in first_alert and "Cash out: your Yes bet bought at 32% is now 50% (+56%), at your target of 45%" in first_alert
+    # A run sends its own message only for something the owner may act on: here, their bet reaching its target.
+    assert "Cash out: your Yes bet bought at 32% is now 50% (+56%), at your target of 45%" in first_alert
+    assert "- Forecast" not in first_alert and "Practice wallets" not in first_alert
     # The bot said 70% against a price of 50%, so two rules practise on it with fake coins, on opposite sides.
-    assert "Practice wallets (fake coins): 2 bought and 0 sold this run." in first_alert
     assert "Fake-coin wallets (each started with 1,000): Back the bot 999, Fade the bot 999, Back the favourite 1,000" in first_alert
     bets = [json.loads(line) for line in (private / "bets.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [(bet["rule"], bet["action"], bet["side"], bet["coins"]) for bet in bets] == [("Back the bot", "buy", "yes", 20.0), ("Fade the bot", "buy", "no", 20.0)]
     assert markets.UNTESTED in first_alert and "bet" not in "\n".join(summary)  # the public page never shows a bet
-    alerts = sorted((private / "alerts").iterdir())
-    assert len(alerts) == 2 and "Resolved Yes" in alerts[1].read_text(encoding="utf-8") and "bot right 100%" in alerts[1].read_text(encoding="utf-8")
-    assert "Practice result (fake coins): Back the bot won 19, Fade the bot lost 20" in alerts[1].read_text(encoding="utf-8")
-    assert "Back the bot 1,019, Fade the bot 980" in alerts[1].read_text(encoding="utf-8")
+    assert len(list((private / "alerts").iterdir())) == 1  # the result changed no advice, so it waits for the daily assessment
+    start = [json.loads(line) for line in (private / "daily.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(start) == 1 and start[0]["start"] and start[0]["near"] == markets.NEAR_MARKETS  # a starting point, noted once
     card = (private / "scorecard.md").read_text(encoding="utf-8")
     assert "## Practice betting with fake coins" in card and "| Back the bot | 0 | 1 | 1 | +96% |" in card
     assert "**Referee:** 2 practice trades replayed, none broke a rule." in card and "Goal: turn 1,000 coins into 5,000" in card
@@ -714,10 +714,55 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
 
 
+def test_each_day_is_assessed_once_and_too_few_bets_widen_the_watch():
+    day = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
+    stamp = lambda hour: f"{day}T{hour:02d}:00:00+00:00"  # noqa: E731
+
+    def buy(n, rule, when):
+        return {
+            "rule": rule, "id": f"m{n}", "question": f"Will the stock {n} rise?", "url": f"https://example.org/{n}", "action": "buy",
+            "side": "yes", "price": 0.5, "coins": 20.0, "shares": 40.0, "bid": 0.48, "ask": 0.5, "at": when, "forecast": 0.7, "kind": "price",
+        }
+
+    trades = [buy(1, "Back the bot", stamp(3)), buy(2, "Back the bot", stamp(5)), buy(3, "Fade the bot", stamp(6))]
+    trades.append({**trades[0], "action": "sell", "price": 0.75, "coins": 30.0, "at": stamp(9)})  # sold for a gain of half
+    ledger = [
+        {"id": "m2", "question": "Will the stock 2 rise?", "url": "https://example.org/2", "forecast": 0.7, "price": 0.5, "closes": stamp(23)},
+        {"id": "m2", "outcome": 0, "settled_at": stamp(20), "run": stamp(20)},  # resolved No: that bet is lost
+    ]
+    outcomes = {"m2": 0}
+    private = hooks.STATE_DIR / "private"
+    private.mkdir()
+    with setting(markets, "PRIVATE", private):
+        wallets = wallet.standings(trades, outcomes, {})
+        learned = wallet.lessons(trades, outcomes)
+        first = markets.assess(NOW, ledger, trades, wallets, learned, [])
+        assert first[1] is None and first[0]["start"] and markets.near_markets() == markets.NEAR_MARKETS  # the first call only notes a start
+        earlier = {"date": (NOW - timedelta(days=2)).strftime("%Y-%m-%d"), "coins": {name: 1000.0 for name in wallets}, "near": 6}
+        (private / "daily.jsonl").write_text(json.dumps(earlier) + "\n", encoding="utf-8")
+        row, text = markets.assess(NOW, ledger, trades, wallets, learned, [])
+        assert (row["date"], row["bets"], row["closed"], row["near"]) == (day, 3, 2, 10)  # three bets is under ten: watch four more
+        assert "**Bets placed: 3.** The target is at least 10 a day. Missed, so the bot now watches 10 near-term markets instead of 6." in text
+        assert "**Bets closed: 2**, of which 1 made coins (on average -25% a bet)." in text
+        assert "no wallet is above its 1,000 starting coins.** The closest is" in text and "| Back the bot | 990 | -10 | 2 | 2 | 2 |" in text
+        assert "1 watched markets resolved. The bot was right on 0%" in text and "none broke a rule" in text
+        (private / "daily.jsonl").write_text(json.dumps(earlier) + "\n" + json.dumps(row) + "\n", encoding="utf-8")
+        assert markets.assess(NOW, ledger, trades, wallets, learned, []) is None and markets.near_markets() == 10  # once a day, and the dial holds
+        busy = [buy(100 + n, "Back the bot", stamp(n % 24)) for n in range(12)]
+        (private / "daily.jsonl").write_text(json.dumps(earlier) + "\n", encoding="utf-8")
+        row, text = markets.assess(NOW, ledger, busy, wallet.standings(busy, {}, {}), {}, [])
+        assert row["bets"] == 12 and row["near"] == 6 and "Met." in text  # enough bets: the watch stays as it is
+
+
 def test_fake_coin_wallets_trade_at_live_prices_pay_fees_and_earn_a_say_only_by_results():
     at = lambda minutes: (NOW + timedelta(minutes=minutes)).isoformat()  # noqa: E731
-    assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None, "yes"]
-    assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no", None]  # a favourite, and the bot is very sure
+    assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None, "yes", None, None, None]
+    assert [rule(0.05, 0.12) for rule in wallet.RULES.values()][:5] == [None, None, "no", "no", None]  # a favourite, and the bot is very sure
+    # Three rules ignore the bot: a near-certain side close to the end, and the price's own move since the bot first looked.
+    assert wallet.late_favourite(0.5, 0.94, None, {"days_left": 1.5}) == "yes" and wallet.late_favourite(0.5, 0.94, None, {"days_left": 5}) is None
+    assert wallet.late_favourite(0.5, 0.05, None, {"days_left": 0.5}) == "no" and wallet.late_favourite(0.5, 0.5, "yes", {"days_left": 9}) == "yes"
+    assert wallet.follow_the_move(0.5, 0.62, None, {"seen_price": 0.50}) == "yes" and wallet.fade_the_move(0.5, 0.62, None, {"seen_price": 0.50}) == "no"
+    assert wallet.follow_the_move(0.5, 0.55, None, {"seen_price": 0.50}) is None and wallet.follow_the_move(0.5, 0.62) is None
     # Back the bot keeps a position until its reason has gone; the price's-side rules hold to the end.
     assert wallet.back_the_bot(0.7, 0.65, held="yes") == "yes" and wallet.back_the_bot(0.7, 0.69, held="yes") is None
     assert wallet.back_the_bot(0.3, 0.5, held="yes") == "no"  # the bot changed its mind: switch sides

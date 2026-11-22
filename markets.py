@@ -13,6 +13,7 @@ private market-alerts repository:
     watch.txt      the owner's markets and bets (they edit this)
     ledger.jsonl   every forecast, with the market price at the time and, later, the outcome
     scorecard.md   how the bot has done on the markets that have resolved, and the fake-coin wallets
+    daily.jsonl    one line a day: bets placed and closed, each wallet's coins, and how many markets to watch
     bets.jsonl     every practice trade the betting rules made with fake coins (see wallet.py)
     alerts/        what to tell the owner after a run; each file becomes a private issue
 """
@@ -47,6 +48,9 @@ PRIVATE = Path(os.getenv("PRIVATE_DIR") or "private")
 AUTO_MARKETS = int(os.getenv("AUTO_MARKETS") or 6)  # busiest markets closing in 3 to 90 days, watched unasked
 NEAR_MARKETS = int(os.getenv("NEAR_MARKETS") or 6)  # busiest markets closing within 3 days: they grade the bot quickly
 PRICE_MOVE = float(os.getenv("PRICE_MOVE") or 0.1)  # a price change this large is worth telling the owner
+BETS_A_DAY = int(os.getenv("BETS_A_DAY") or 10)  # the owner wants at least this many practice bets a day to judge by
+MOST_NEAR = 30  # the dial below never asks for more near-term markets than this
+URGENT = ("- Cash out", "- Cut the loss", "- Consider", "- Hold", "- Worth a look", "- The referee found")  # worth a message of their own
 EDGE = 0.1  # the bot's view differs from the price by this much: worth saying, though not worth acting on
 NEARLY_WON = 0.9  # at this price a winning bet has little left to gain, so locking it in is worth a thought
 # The bot earns a say on one kind of market only from its own live record there: at least this
@@ -113,11 +117,17 @@ def watch_list() -> tuple[list[tuple[dict, dict]], list[str]]:
             except Exception:
                 pass  # it is valued at cost until it can be read again
     try:
-        for row in tools.busiest_markets(AUTO_MARKETS, 3, 90) + tools.busiest_markets(NEAR_MARKETS, 0.5, 3):
+        for row in tools.busiest_markets(AUTO_MARKETS, 3, 90) + tools.busiest_markets(near_markets(), 0.5, 3):
             watch.setdefault(row["id"], (row, {}))
     except Exception as error:
         problems.append(f"Could not list the busiest markets this time ({type(error).__name__}).")
     return list(watch.values()), problems
+
+
+def near_markets() -> int:
+    """How many near-term markets to watch. The daily assessment turns this up when too few bets were placed."""
+    days = _read("daily.jsonl")
+    return days[-1].get("near", NEAR_MARKETS) if days else NEAR_MARKETS
 
 
 def price_move(link: str, price: float, state: dict) -> list[str]:
@@ -230,6 +240,7 @@ def practise(
         if results:
             lines.append(f"- Practice result (fake coins): {', '.join(results)}: {link}")
     opinion = {row["id"]: row["forecast"] for row in ledger if "forecast" in row}  # later rows overwrite: the bot's current view
+    seen = _first_forecasts(ledger)
     live = {}
     for row, _ in listed:
         if row["id"] in opinion and row["id"] not in outcomes:
@@ -237,7 +248,10 @@ def practise(
                 row = next(fresh for fresh in tools.polymarket(row["url"]) if fresh["id"] == row["id"])
             except Exception:
                 pass
-            live[row["id"]] = {**row, "forecast": opinion[row["id"]], "kind": bench.kind(row["question"])}
+            live[row["id"]] = {
+                **row, "forecast": opinion[row["id"]], "kind": bench.kind(row["question"]),
+                "seen_price": seen[row["id"]]["price"],  # the price when the bot first forecast this market
+            }
     new = wallet.trade(list(live.values()), trades, outcomes, at)
     if new:
         bought = sum(trade["action"] == "buy" for trade in new)
@@ -307,6 +321,101 @@ def record(ledger: list[dict]) -> str:
     )
 
 
+def _lessons(learned: dict | None) -> list[str]:
+    """What the self-trained wallet currently believes, one line for each kind of market."""
+    return [
+        f"- **{kind} markets:** follows \"{lesson['rule']}\" ({lesson['bets']} closed bets, {lesson['gain']:+.0%} a bet)."
+        if lesson["follow"]
+        else f"- **{kind} markets:** does not bet. The best rule so far, \"{lesson['rule']}\", has made {lesson['gain']:+.0%} a bet over {lesson['bets']} bets."
+        if lesson["rule"]
+        else f"- **{kind} markets:** still learning. No rule has {wallet.LEARN_BETS} closed bets here yet (most so far: {lesson['bets']})."
+        for kind, lesson in sorted((learned or {}).items())
+    ] or ["- Nothing yet: no practice bet has closed since the wallets last started."]
+
+
+def closed_on(day: str, trades: list[dict], ledger: list[dict]) -> list[tuple[str, float]]:
+    """Every practice bet that closed on a day, by sale or because its market resolved: (wallet, gain per coin staked)."""
+    settled = {row["id"]: ((row.get("run") or row["settled_at"])[:10], row["outcome"]) for row in ledger if "outcome" in row}
+    closed = []
+    for name in wallet.WALLETS:
+        held: dict[str, dict] = {}
+        for trade in trades:
+            if trade["rule"] != name:
+                continue
+            if trade["action"] == "buy":
+                held[trade["id"]] = trade
+            else:
+                bought = held.pop(trade["id"])
+                if trade["at"][:10] == day:
+                    closed.append((name, trade["coins"] / bought["coins"] - 1))
+        for key, bought in held.items():
+            if key in settled and settled[key][0] == day:
+                outcome = settled[key][1]
+                closed.append((name, bought["shares"] * (outcome if bought["side"] == "yes" else 1 - outcome) / bought["coins"] - 1))
+    return closed
+
+
+def assess(now: datetime, ledger: list[dict], trades: list[dict], wallets: dict, learned: dict, broken: list[str]) -> tuple[dict, str | None] | None:
+    """Once a day, judge the day before. Returns that day's record and the report for the owner.
+
+    None means yesterday is already assessed. The very first call only notes a starting
+    point (no report), so each wallet's change over a day can be measured from then on. The
+    record also carries the dial: when fewer than BETS_A_DAY bets were placed, the bot is
+    told to watch more near-term markets from now on.
+    """
+    days = _read("daily.jsonl")
+    day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    if days and days[-1]["date"] >= day:
+        return None
+    coins = {name: round(row["coins"], 2) for name, row in wallets.items()}
+    if not days:
+        return {"date": day, "start": True, "bets": 0, "closed": 0, "coins": coins, "near": NEAR_MARKETS}, None
+    bought = [trade for trade in trades if trade["action"] == "buy" and trade["at"][:10] == day]
+    closed = closed_on(day, trades, ledger)
+    near = days[-1].get("near", NEAR_MARKETS)
+    wanted = min(MOST_NEAR, near + 4) if len(bought) < BETS_A_DAY else max(NEAR_MARKETS, near - 2) if len(bought) > 8 * BETS_A_DAY else near
+    before = days[-1]["coins"]
+    settled_that_day = {row["id"] for row in ledger if "outcome" in row and (row.get("run") or row["settled_at"])[:10] == day}
+    graded = [row for row in _graded(ledger) if row["id"] in settled_that_day]
+    ahead = sorted((name for name in wallets if coins[name] > wallet.START), key=lambda name: -coins[name])
+    best = max(coins, key=coins.get)
+    lines = [
+        f"# Daily assessment: {day}", "",
+        f"**Bets placed: {len(bought)}.** The target is at least {BETS_A_DAY} a day"
+        + (". Met." if len(bought) >= BETS_A_DAY else f". Missed, so the bot now watches {wanted} near-term markets instead of {near}."),
+        f"**Bets closed: {len(closed)}**, of which {sum(gain > 0 for _, gain in closed)} made coins"
+        + (f" (on average {sum(gain for _, gain in closed) / len(closed):+.0%} a bet)." if closed else "."),
+        "**Profit: "
+        + (
+            f"{len(ahead)} of {len(wallets)} wallets are above their {wallet.START:,.0f} starting coins:** "
+            + ", ".join(f"{name} {coins[name]:,.0f}" for name in ahead) + "."
+            if ahead
+            else f"no wallet is above its {wallet.START:,.0f} starting coins.** The closest is {best} at {coins[best]:,.0f}."
+        ),
+        "",
+        "| Wallet | Coins now | Change over the day | Bets that day | Closed that day | All closed bets | Gain a bet | Course to the goal |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    lines += [
+        f"| {name} | {coins[name]:,.0f} | {coins[name] - before[name]:+,.0f} | "
+        if name in before
+        else f"| {name} | {coins[name]:,.0f} | new | "
+        for name in wallets
+    ]
+    for position, (name, row) in enumerate(wallets.items(), len(lines) - len(wallets)):
+        lines[position] += (
+            f"{sum(trade['rule'] == name for trade in bought)} | {sum(wallet_name == name for wallet_name, _ in closed)} | "
+            f"{row['closed']} | {row['per_bet']:+.0%} | {wallet.course(row)} |"
+        )
+    if graded:
+        bot, price = bench.score(graded), bench.score(graded, "crowd")
+        lines += ["", f"**Forecasts:** {len(graded)} watched markets resolved. The bot was right on {bot['accuracy']:.0%}, the market price on {price['accuracy']:.0%}."]
+    lines += ["", "**What the bot has taught itself** (which rule the self-trained wallet follows on each kind of market):", *_lessons(learned)]
+    lines += ["", f"**Referee:** {len(trades)} practice trades replayed, " + (f"{len(broken)} broke a rule (listed in the scorecard)." if broken else "none broke a rule.")]
+    lines += ["", record(ledger), "No real money is involved. The full scorecard is in `scorecard.md`."]
+    return {"date": day, "bets": len(bought), "closed": len(closed), "coins": coins, "near": wanted}, "\n".join(lines) + "\n"
+
+
 def scorecard(
     ledger: list[dict], problems: list[str], wallets: dict | None = None, held: list[dict] = (), trades: list[dict] = (),
     broken: list[str] = (), checked: int = 0, learned: dict | None = None,
@@ -373,14 +482,7 @@ def scorecard(
             f"closed bets on the kind and is ahead. Where no rule has made coins, it does not bet.",
             "",
         ]
-        lines += [
-            f"- **{kind} markets:** follows \"{lesson['rule']}\" ({lesson['bets']} closed bets, {lesson['gain']:+.0%} a bet)."
-            if lesson["follow"]
-            else f"- **{kind} markets:** does not bet. The best rule so far, \"{lesson['rule']}\", has made {lesson['gain']:+.0%} a bet over {lesson['bets']} bets."
-            if lesson["rule"]
-            else f"- **{kind} markets:** still learning. No rule has {wallet.LEARN_BETS} closed bets here yet (most so far: {lesson['bets']})."
-            for kind, lesson in sorted((learned or {}).items())
-        ] or ["- Nothing yet: no practice bet has closed since the wallets last started."]
+        lines += _lessons(learned)
         cents = lambda price: "not quoted" if price is None else f"{price * 100:.0f}¢"  # noqa: E731
         if held:
             lines += ["", "### Open practice positions", "", "| Rule | Side | Paid | Sells for now | Gain | Market |", "|---|---|---|---|---|---|"]
@@ -448,7 +550,8 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
         )
     ledger += fresh
     practice, new_trades, wallets, held, broken = practise(ledger, listed, settled_now, now.isoformat(timespec="seconds"))
-    alerts = [line for line in summary if line.startswith(("- Forecast", "- Price"))] + private + practice
+    # A run sends its own message only for something the owner may act on. The rest waits for the daily assessment.
+    alerts = [line for line in private + practice if line.startswith(URGENT)]
     if tell:
         (PRIVATE / "alerts").mkdir(parents=True, exist_ok=True)
         for name, entries in (("ledger.jsonl", fresh), ("bets.jsonl", new_trades)):
@@ -456,9 +559,16 @@ def watch(bot: autopilot.Autopilot, tell: bool) -> tuple[list, list[str]]:
                 out.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
         log = _trades()
         outcomes = {row["id"]: row["outcome"] for row in ledger if "outcome" in row}
+        learned = wallet.lessons(log, outcomes)
         (PRIVATE / "scorecard.md").write_text(
-            scorecard(ledger, problems, wallets, held, log[-20:], broken, len(log), wallet.lessons(log, outcomes)), encoding="utf-8"
+            scorecard(ledger, problems, wallets, held, log[-20:], broken, len(log), learned), encoding="utf-8"
         )
+        judged = assess(now, ledger, log, wallets, learned, broken)
+        if judged:
+            with open(PRIVATE / "daily.jsonl", "a", encoding="utf-8") as out:
+                out.write(json.dumps(judged[0]) + "\n")
+            if judged[1]:
+                (PRIVATE / "alerts" / f"daily-{judged[0]['date']}.md").write_text(judged[1], encoding="utf-8")
         if alerts:
             coins = ", ".join(f"{name} {row['coins']:,.0f}" for name, row in wallets.items())
             foot = ["", record(ledger), f"Fake-coin wallets (each started with {wallet.START:,.0f}): {coins}. Goal: {wallet.GOAL:,.0f}."]
