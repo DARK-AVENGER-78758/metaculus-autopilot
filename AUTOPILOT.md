@@ -288,6 +288,21 @@ bet you listed (cash out, cut the loss, hold), when a rule that has proved itsel
 a bet, or when the referee finds a problem. Forecasts, price moves and practice trades
 are in the scorecard and summed up in the daily assessment.
 
+**The newer rules against the first live week.** Before they started betting, the three
+rules that ignore the bot were tried on that week's 95 resolved markets, using every price
+the bot saw (936 of them) and the real outcomes, one cent above the price and with a fee:
+
+| Rule | Bets | Won | A bet, at a 1% fee rate | At a 5% fee rate |
+|---|---|---|---|---|
+| Late favourite | 58 | 54 | 1.2% lost | 1.5% lost |
+| Follow the move | 45 | 25 | 2.6% lost | 4.2% lost |
+| Fade the move | 45 | 20 | 18.1% lost | 19.6% lost |
+| Back the favourite, held to the end | 73 | 66 | 0.5% gained | 0.1% gained |
+
+Favourites roughly break even, which is what a well-priced market looks like, and nothing
+here shows a profit. The wallets keep betting so that new markets can confirm or overturn
+this, and the self-trained wallet stays out wherever no rule is ahead.
+
 **Self-training.** Nothing here retrains the language models; they are hosted and fixed.
 What trains itself, on every run and with nobody choosing, is how the bot bets:
 
