@@ -11,8 +11,11 @@ forecast and the live price. It sells a position it no longer wants (the bot cha
 or the price moved), may switch to the other side, and buys where it now sees a bet. A rule
 that keeps making coins earns the right to be pointed out to the owner: see `earned`.
 
-Known gaps against a real account: prices are seen only when the bot runs, not tick by tick;
-a small stake is assumed to fill at the best price; trading fees are not charged.
+Every trade pays the market's own taker fee, from the schedule Polymarket publishes for it,
+and an order under the market's minimum size is not placed.
+
+Known gaps against a real account: prices are seen only when the bot runs, not tick by tick,
+and a small stake is assumed to fill at the best price in the order book.
 
 The owner's goal is to turn START coins into GOAL, by winning bets and in no other way. So
 the rules below are fixed, a stake is always STAKE of the spare coins, and `audit` replays
@@ -33,9 +36,14 @@ KEEP = 0.02  # a position bought on a disagreement is kept until the gap has shr
 MAX_OPEN = 25  # positions a rule may hold at once; at 2% each that is half its coins
 MIN_LIQUIDITY = 500.0  # dollars resting in a market's order book before a rule will trade it, when the market says
 MAX_SPREAD = 0.10  # a wider gap between bid and ask means nobody is there to trade with at a fair price
+MAX_DAYS = 14  # a rule only opens a bet on a market closing within this many days, so its coins come back and are bet again
 EARN_BETS, EARN_T = 40, 2.5  # closed bets, and how clearly above zero the gain per bet must be, before a rule earns a say
 GOAL = 5000.0  # the owner's target for a wallet; one that gets there stops opening new bets
-RULES_VERSION = 2  # stamped on every trade; trades from before the stamp existed were made under version 2
+# Stamped on every trade. Version 3 (2026-11-22) followed the first live week: it charges each market's real
+# taker fee and minimum order, opens bets only on markets closing within MAX_DAYS (every wallet had filled up
+# with months-long positions), and holds "Fade the bot" and "Back the favourite" to the end (their early sales
+# lost 28% and 38% a bet, while the same bets held to the end gained). Every wallet restarted from START.
+RULES_VERSION = 3
 LEARNER = "Follow the best"  # a fifth wallet that copies whichever fixed rule has done best so far
 LEARN_BETS = 10  # closed bets a rule needs before the learner will follow it
 
@@ -55,17 +63,13 @@ def back_the_bot(forecast: float, price: float, held: str | None = None) -> str 
 
 
 def fade_the_bot(forecast: float, price: float, held: str | None = None) -> str | None:
-    """Bet the price's side whenever the bot disagrees with it. On past questions the price usually won."""
-    return _lean(price - forecast, held)
+    """Bet the price's side whenever the bot disagrees with it, and hold it to the end. On past questions the price usually won."""
+    return held or _lean(price - forecast, None)
 
 
 def back_the_favourite(forecast: float, price: float, held: str | None = None) -> str | None:
-    """Ignore the bot: buy whichever side is priced 80% to 95%, and sell if it falls under 70%."""
-    if held == "yes" and price >= 0.70:
-        return "yes"
-    if held == "no" and price <= 0.30:
-        return "no"
-    return "yes" if 0.80 <= price <= 0.95 else "no" if 0.05 <= price <= 0.20 else None
+    """Ignore the bot: buy whichever side is priced 80% to 95%, and hold it to the end."""
+    return held or ("yes" if 0.80 <= price <= 0.95 else "no" if 0.05 <= price <= 0.20 else None)
 
 
 def bot_when_sure(forecast: float, price: float, held: str | None = None) -> str | None:
@@ -113,6 +117,22 @@ def quotes(market: dict) -> tuple[float, float]:
     return bid, ask
 
 
+def fee(market: dict, price: float) -> float:
+    """Polymarket's taker fee on one share traded at this price: nothing on a market that charges none.
+
+    The market publishes its rate and exponent; the fee is rate x (price x (1 - price)) ^ exponent
+    a share, so it is largest at 50 cents and, as a share of the stake, heaviest on cheap shares.
+    """
+    return (market.get("fee_rate") or 0.0) * (price * (1 - price)) ** (market.get("fee_exponent") or 1.0)
+
+
+def _days_left(market: dict, at: str) -> float | None:
+    try:
+        return (datetime.fromisoformat(market["market_info_close_datetime"]) - datetime.fromisoformat(at)).total_seconds() / 86400
+    except (KeyError, TypeError, ValueError):
+        return None  # unknown: such a market is not bet on
+
+
 def buy_at(side: str, bid: float, ask: float) -> float:
     """What a share of a side costs now. A No share costs what a Yes seller would get, taken from 1."""
     return ask if side == "yes" else 1 - bid
@@ -157,8 +177,9 @@ def book(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str
 def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> list[dict]:
     """What each rule does now: sell what it no longer wants, then buy what it now wants.
 
-    Each market carries the bot's latest `forecast` and the live quote. A sale closes the whole
-    position at the price a seller gets; a purchase pays the price a buyer pays.
+    Each market carries the bot's latest `forecast`, the live quote and its fee schedule. A sale
+    closes the whole position at the price a seller gets; a purchase pays the price a buyer
+    pays. Both pay the market's taker fee.
     """
     new = []
     followed = leader(trades, outcomes)
@@ -183,20 +204,30 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
             seen = {
                 "rule": name, "id": key, "question": market["question"], "url": market["url"], "at": at,
                 "forecast": market["forecast"], "bid": bid, "ask": ask, "rules": RULES_VERSION,
+                "fee_rate": market.get("fee_rate") or 0.0, "fee_exponent": market.get("fee_exponent") or 1.0,
             }
             if side and want != side:
                 bought = held.pop(key)
-                got = round(bought["shares"] * sell_at(side, bid, ask), 2)
-                new.append({**seen, "action": "sell", "side": side, "price": sell_at(side, bid, ask), "shares": bought["shares"], "coins": got})
+                price = sell_at(side, bid, ask)
+                paid = round(bought["shares"] * fee(market, price), 4)
+                got = round(bought["shares"] * price - paid, 2)
+                new.append({**seen, "action": "sell", "side": side, "price": price, "shares": bought["shares"], "fee": paid, "coins": got})
                 coins += got
                 side = None
             stake, thin = round(STAKE * coins, 2), (market.get("liquidity") or MIN_LIQUIDITY) < MIN_LIQUIDITY
+            days = _days_left(market, at)
             buying = want and not side and worth < GOAL  # a wallet that has reached the goal opens nothing new
+            buying = buying and days is not None and days <= MAX_DAYS  # coins must come back in time to be bet again
             if buying and stake >= 1 and len(held) < MAX_OPEN and not thin and 0.01 <= buy_at(want, bid, ask) <= 0.99:
                 price = buy_at(want, bid, ask)
-                held[key] = {**seen, "action": "buy", "side": want, "price": price, "shares": round(stake / price, 4), "coins": stake}
-                new.append(held[key])
-                coins -= stake
+                shares = round(stake / (price + fee(market, price)), 4)  # the stake covers the shares and the fee on them
+                if shares >= (market.get("min_shares") or 0.0):  # Polymarket takes no smaller order
+                    held[key] = {
+                        **seen, "action": "buy", "side": want, "price": price, "shares": shares,
+                        "fee": round(shares * fee(market, price), 4), "coins": stake,
+                    }
+                    new.append(held[key])
+                    coins -= stake
     return new
 
 
@@ -211,6 +242,7 @@ def positions(trades: list[dict], outcomes: dict, markets: dict[str, dict]) -> l
                 if ask - bid > MAX_SPREAD:  # no real bid to sell into: use the last shown price instead
                     bid = ask = markets[key]["price"]
                 now = sell_at(bought["side"], bid, ask)
+                now -= fee(markets[key], now)  # selling pays the fee too
             value = bought["coins"] if now is None else bought["shares"] * now
             rows.append({**bought, "now": now, "value": value, "gain": value / bought["coins"] - 1})
     return rows
@@ -275,8 +307,10 @@ def audit(trades: list[dict], outcomes: dict, known_from: dict | None = None) ->
                 flag("not bought at the live asking price")
             if trade["coins"] > STAKE * coins[name] + 0.01:
                 flag(f"staked {trade['coins']:.2f} coins, more than {STAKE:.0%} of its {coins[name]:.2f} spare coins")
-            if abs(trade["shares"] * trade["price"] - trade["coins"]) > 0.01:
-                flag("its shares, price and coins do not add up")
+            if abs(trade["shares"] * trade["price"] + trade.get("fee", 0.0) - trade["coins"]) > 0.01:
+                flag("its shares, price, fee and coins do not add up")
+            if abs(trade.get("fee", 0.0) - trade["shares"] * fee(trade, trade["price"])) > 0.01:
+                flag("did not pay the market's published fee")
             if len(held[name]) >= MAX_OPEN:
                 flag(f"held more than {MAX_OPEN} positions")
             coins[name] -= trade["coins"]
@@ -288,8 +322,10 @@ def audit(trades: list[dict], outcomes: dict, known_from: dict | None = None) ->
                 continue
             if abs(trade["price"] - sell_at(trade["side"], bid, ask)) > 1e-9:
                 flag("not sold at the live bid")
-            if abs(trade["coins"] - bought["shares"] * trade["price"]) > 0.01:
-                flag("its shares, price and coins do not add up")
+            if abs(trade["coins"] - (bought["shares"] * trade["price"] - trade.get("fee", 0.0))) > 0.01:
+                flag("its shares, price, fee and coins do not add up")
+            if abs(trade.get("fee", 0.0) - bought["shares"] * fee(trade, trade["price"])) > 0.01:
+                flag("did not pay the market's published fee")
             coins[name] += trade["coins"]
     pay_out(None)
     for name in WALLETS if known_from is not None else []:  # the replay and the wallet's own books must agree

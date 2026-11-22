@@ -199,9 +199,10 @@ themselves. One coin behaves like one dollar on Polymarket.
 | A losing share | Pays nothing: the stake is lost | The same |
 | A change of mind | The position is sold, and the other side may be bought | The same, if you choose to |
 | Thin markets | Not traded under 500 dollars of resting orders, or with bid and ask 10 points apart | You could, at a bad price |
+| Smallest order | The market's own minimum (often 5 shares) | The same |
 | Price updates | Each time the bot runs, about every 40 to 60 minutes | Tick by tick |
 | Size | Small stakes, assumed filled at the best price | Large orders move the price |
-| Fees | Not charged | Charged on some markets |
+| Fees | Each market's own taker fee, buying and selling: shares × rate × price × (1 − price), with the rate the market publishes | The same |
 
 On every run each rule looks at every position again, with the bot's latest forecast and
 the live price:
@@ -209,9 +210,10 @@ the live price:
 | Rule | Buys | Sells |
 |---|---|---|
 | Back the bot | The bot's side when it is 10 points from the price | When the price has come within 2 points of the bot, or the bot now leans the other way |
-| Fade the bot | The price's side in those same cases | When that disagreement is over, or has reversed |
-| Back the favourite | The side priced 80% to 95%, whatever the bot says | When it falls under 70% |
+| Fade the bot | The price's side in those same cases | Never: held until the market resolves |
+| Back the favourite | The side priced 80% to 95%, whatever the bot says | Never: held until the market resolves |
 | Bot when very sure | The bot's side under 10% or over 90%, if the price is 5 points behind | When the bot is no longer sure |
+| Bot on price markets | As Back the bot, but only on price markets (crypto, oil and the like) | As Back the bot |
 
 **The goal and the referee.** The owner's goal is to turn 1,000 fake coins into 5,000 by
 winning bets, and in no other way. Three things keep that honest:
@@ -229,15 +231,52 @@ bets and is ahead, it copies that rule, and it moves if another rule overtakes. 
 scorecard's "Course to the goal" column says how many more bets each wallet would need at
 the rate it has actually been winning, or "not on course".
 
+**The first live week (16 to 22 November 2026), under the earlier rules with no fees.**
+The bot forecast 138 markets and 93 resolved; the wallets made 676 trades, and the
+referee, once its own bug was fixed, found none that broke a rule.
+
+| | Result |
+|---|---|
+| Bot against the price, 93 resolved markets | Bot right 71%, price right 82% |
+| Price markets (47) | Bot 87%, price 87% |
+| Every other kind (46: weather, tweet counts, scores) | Bot 56%, price 76% |
+| Back the bot | 936 coins from 1,000 |
+| Fade the bot | 931 |
+| Back the favourite | 958 |
+| Bot when very sure | 952 |
+| Follow the best | 778 |
+
+Every wallet lost. Three things were learned and built into version 3 of the rules, after
+which every wallet restarted from 1,000 (the week-one log is kept as `bets-v2.jsonl`):
+
+- **Fees.** Polymarket charges a taker fee on many markets and publishes each market's
+  rate. On a 10-cent share at a 5% rate it is about 4.5% of the stake. The practice
+  account now charges it.
+- **Wallets clogged.** Every wallet filled its 25 places with positions months from
+  resolving and stopped betting. Rules now open bets only on markets closing within 14
+  days.
+- **Early sales hurt two rules.** Fade the bot's early sales lost 28% a bet and Back the
+  favourite's lost 38%, while the same bets held to the end gained. Both now hold to the
+  end.
+
+One pattern is worth testing, not yet believing: backing the bot on price markets made
+27% a bet over 65 closed bets, before fees and without a clear margin. It has its own
+wallet, "Bot on price markets", and only bets made from now on can prove it.
+
+The referee itself was wrong for that week: it forgot to pay a wallet out when its
+market resolved, so it reported hundreds of false alarms. It now settles each market at
+the run that learned the result and checks its replay against the wallet's own books.
+
 A rule stakes 2% of its spare coins a bet and holds at most 25 positions. A market with an
 open position is followed until it resolves, so the bot keeps forecasting it and the rule
 can react. Every trade is in `bets.jsonl`; the scorecard shows each wallet, every open
 position with what it would sell for now, and the latest trades. Each alert ends with the
 four balances.
 
-The same rules on 279 resolved questions (bought once and held to the end): Back the bot
-lost 46% per coin, Fade the bot gained 8% but not reliably, Back the favourite lost 1%, Bot
-when very sure lost 20%. The live wallets are the fair test, because their trades are made
+The same rules on 535 resolved questions with a market price (bought once and held to the
+end): Back the bot lost 22% per coin, Fade the bot lost 3%, Back the favourite broke even,
+Bot when very sure lost 12%. No rule made coins in both halves of those questions for any
+kind of question. The live wallets are the fair test, because their trades are made
 before anyone knows the outcome. A rule earns a say after 40 closed bets if its gain per
 bet is clearly above zero (a margin of 2.5 or more); from then on its new bets are flagged
 to you as "Worth a look". Until a rule earns that, treat its trades as practice only.
@@ -340,6 +379,14 @@ rule on one half of the results and scores it on the other half, then swaps the 
 Only the other-half score counts: a rule always looks good on the questions it was chosen
 on. Questions that differ only in a number, such as one market's price brackets, are kept
 in the same half.
+
+### After 746 questions (2026-11-22)
+
+The exam has now sat 746 resolved questions: bot 73% right (Brier 0.177), crowd 81%
+(0.130). Under 10% or over 90% the bot is right 90% of the time, on 28% of questions. On
+the 535 with a market price, mixing any of the bot's forecast into the price still made
+it less accurate, and where the two were on opposite sides of 50% the price was right
+75% of the time.
 
 ### After 384 questions (2026-11-15)
 

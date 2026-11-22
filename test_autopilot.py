@@ -677,7 +677,7 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     # A whole run, then a second one after the market resolves.
     row = {
         "id": "polymarket-a", "question": "Will A happen?", "url": "https://polymarket.com/market/a",
-        "resolution_criteria": "Resolves Yes if A happens.", "market_info_close_datetime": (NOW + timedelta(days=30)).isoformat(),
+        "resolution_criteria": "Resolves Yes if A happens.", "market_info_close_datetime": (NOW + timedelta(days=10)).isoformat(),
         "freeze_datetime": NOW.isoformat(), "price": 0.5,
     }
     private = hooks.STATE_DIR / "private"
@@ -709,60 +709,72 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     card = (private / "scorecard.md").read_text(encoding="utf-8")
     assert "## Practice betting with fake coins" in card and "| Back the bot | 0 | 1 | 1 | +96% |" in card
     assert "**Referee:** 2 practice trades replayed, none broke a rule." in card and "Goal: turn 1,000 coins into 5,000" in card
-    assert "### Latest practice trades" in card and "Back the bot bought 39 Yes at 51¢ for 20 coins (bot 70%, bid 49¢, ask 51¢)" in card
+    assert "### Latest practice trades" in card and "Back the bot bought 39 Yes at 51¢ for 20 coins (bot 70%, bid 49¢, ask 51¢, fee 0.00)" in card
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
 
 
-def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_earn_a_say_only_by_results():
+def test_fake_coin_wallets_trade_at_live_prices_pay_fees_and_earn_a_say_only_by_results():
+    at = lambda minutes: (NOW + timedelta(minutes=minutes)).isoformat()  # noqa: E731
     assert [rule(0.7, 0.5) for rule in wallet.RULES.values()] == ["yes", "no", None, None, "yes"]
     assert [rule(0.05, 0.12) for rule in wallet.RULES.values()] == [None, None, "no", "no", None]  # a favourite, and the bot is very sure
-    # A position is kept until its reason has gone, not dropped at the first wobble.
+    # Back the bot keeps a position until its reason has gone; the price's-side rules hold to the end.
     assert wallet.back_the_bot(0.7, 0.65, held="yes") == "yes" and wallet.back_the_bot(0.7, 0.69, held="yes") is None
     assert wallet.back_the_bot(0.3, 0.5, held="yes") == "no"  # the bot changed its mind: switch sides
-    assert wallet.back_the_favourite(0.5, 0.75, held="yes") == "yes" and wallet.back_the_favourite(0.5, 0.65, held="yes") is None
+    assert wallet.back_the_favourite(0.5, 0.65, held="yes") == "yes" and wallet.fade_the_bot(0.3, 0.3, held="no") == "no"
 
-    def market(n, forecast, bid, ask, **extra):
-        return {"id": f"m{n}", "question": f"Q{n}?", "url": f"https://example.org/{n}", "forecast": forecast, "price": (bid + ask) / 2, "bid": bid, "ask": ask, **extra}
+    def market(n, forecast, bid, ask, days=3, **extra):
+        return {
+            "id": f"m{n}", "question": f"Q{n}?", "url": f"https://example.org/{n}", "forecast": forecast, "price": (bid + ask) / 2,
+            "bid": bid, "ask": ask, "market_info_close_datetime": (NOW + timedelta(days=days)).isoformat(), **extra,
+        }
 
     assert wallet.quotes({"price": 0.5}) == (0.49, 0.51) and wallet.quotes(market(1, 0.7, 0.48, 0.52)) == (0.48, 0.52)
-    trades = wallet.trade([market(1, 0.7, 0.48, 0.52), market(2, 0.5, 0.49, 0.51)], [], {}, "t1")
+    trades = wallet.trade([market(1, 0.7, 0.48, 0.52), market(2, 0.5, 0.49, 0.51)], [], {}, at(1))
     assert [(t["rule"], t["id"], t["action"], t["side"], t["price"], t["coins"]) for t in trades] == [
         ("Back the bot", "m1", "buy", "yes", 0.52, 20.0),  # a buyer pays the ask
         ("Fade the bot", "m1", "buy", "no", 0.52, 20.0),  # a No share costs 1 minus the Yes bid
     ]
-    assert wallet.trade([market(1, 0.7, 0.48, 0.52)], trades, {}, "t2") == []  # nothing changed: hold
+    assert wallet.trade([market(1, 0.7, 0.48, 0.52)], trades, {}, at(2)) == []  # nothing changed: hold
     table = wallet.standings(trades, {}, {"m1": market(1, 0.7, 0.58, 0.62)})
     assert round(table["Back the bot"]["coins"], 2) == round(980 + 20 / 0.52 * 0.58, 2)  # open bets are worth what they sell for
     assert round(wallet.standings(trades, {}, {})["Back the bot"]["coins"], 2) == 1000.0  # no quote: valued at cost
 
-    # The price comes to the bot, so the disagreement is over: both rules sell at what a seller gets.
-    later = wallet.trade([market(1, 0.7, 0.68, 0.70)], trades, {}, "t3")
-    assert [(t["rule"], t["action"], t["side"], round(t["price"], 2)) for t in later] == [
-        ("Back the bot", "sell", "yes", 0.68),  # bought at 52 cents, sold at 68: a profit
-        ("Fade the bot", "sell", "no", 0.30),  # bought at 52 cents, sold at 30: a loss
-    ]
-    assert round(later[0]["coins"], 2) == round(20 / 0.52 * 0.68, 2) and later[1]["coins"] < 20
-    assert wallet.book("Back the bot", trades + later, {})[2][0] > 0 > wallet.book("Fade the bot", trades + later, {})[2][0]
-    # The bot changes its mind instead: each rule sells its side and buys the other one.
-    switched = wallet.trade([market(1, 0.3, 0.48, 0.52)], trades, {}, "t3")
-    assert [(t["rule"], t["action"], t["side"]) for t in switched] == [
-        ("Back the bot", "sell", "yes"), ("Back the bot", "buy", "no"), ("Fade the bot", "sell", "no"), ("Fade the bot", "buy", "yes"),
-    ]
+    # The price comes to the bot: Back the bot cashes out at the bid. Fade the bot holds its side to the end.
+    later = wallet.trade([market(1, 0.7, 0.68, 0.70)], trades, {}, at(3))
+    assert [(t["rule"], t["action"], t["side"], round(t["price"], 2)) for t in later] == [("Back the bot", "sell", "yes", 0.68)]
+    assert round(later[0]["coins"], 2) == round(20 / 0.52 * 0.68, 2) and wallet.book("Back the bot", trades + later, {})[2][0] > 0
+    # The bot changes its mind instead: Back the bot sells its side and buys the other one.
+    switched = wallet.trade([market(1, 0.3, 0.48, 0.52)], trades, {}, at(3))
+    assert [(t["rule"], t["action"], t["side"]) for t in switched] == [("Back the bot", "sell", "yes"), ("Back the bot", "buy", "no")]
 
-    # A wallet limited to one kind of market opens bets there and nowhere else.
-    kinds = wallet.trade([market(6, 0.7, 0.48, 0.52, kind="price"), market(7, 0.7, 0.48, 0.52, kind="other")], [], {}, "t")
+    # Polymarket's fee: shares x rate x price x (1 - price), paid buying and selling. It is heaviest on cheap shares.
+    charged = market(8, 0.3, 0.09, 0.10, fee_rate=0.05, fee_exponent=1.0, min_shares=5.0)
+    assert abs(wallet.fee(charged, 0.10) - 0.0045) < 1e-12 and wallet.fee(market(1, 0.7, 0.48, 0.52), 0.5) == 0.0
+    bought = [t for t in wallet.trade([charged], [], {}, at(1)) if t["rule"] == "Back the bot"][0]
+    assert bought["price"] == 0.10 and abs(bought["shares"] - 20 / 0.1045) < 0.001 and abs(bought["fee"] - bought["shares"] * 0.0045) < 0.001
+    assert abs(bought["shares"] * 0.10 + bought["fee"] - 20.0) < 0.01  # the stake covers the shares and the fee
+    sold = wallet.trade([{**charged, "bid": 0.29, "ask": 0.30, "price": 0.295}], [bought], {}, at(2))[0]
+    assert sold["action"] == "sell" and abs(sold["coins"] - bought["shares"] * (0.29 - 0.05 * 0.29 * 0.71)) < 0.01
+    assert wallet.audit([bought, sold], {}, {}) == []
+    assert "did not pay the market's published fee" in wallet.audit([{**bought, "fee": 0.0, "shares": 200.0}], {}, {})[0]
+    assert wallet.trade([{**charged, "min_shares": 500.0}], [], {}, at(1)) == []  # under the smallest order Polymarket takes
+
+    # A wallet limited to one kind of market opens bets there and nowhere else. No wallet bets on a market months away.
+    kinds = wallet.trade([market(6, 0.7, 0.48, 0.52, kind="price"), market(7, 0.7, 0.48, 0.52, kind="other")], [], {}, at(1))
     assert [t["id"] for t in kinds if t["rule"] == "Bot on price markets"] == ["m6"]
     assert [t["id"] for t in kinds if t["rule"] == "Back the bot"] == ["m6", "m7"]
+    assert wallet.trade([market(9, 0.7, 0.48, 0.52, days=40)], [], {}, at(1)) == []
+    assert wallet.trade([{**market(9, 0.7, 0.48, 0.52), "market_info_close_datetime": ""}], [], {}, at(1)) == []
 
     # Risk of loss: a position held to the end pays 1 a share or nothing. A thin or unquoted market is not traded.
     coins, held, gains = wallet.book("Back the bot", trades, {"m1": 0})
     assert coins == 980.0 and not held and gains == [-1.0]
     coins, _, gains = wallet.book("Back the bot", trades, {"m1": 1})
     assert round(coins, 2) == round(980 + 20 / 0.52, 2) and round(gains[0], 3) == round(1 / 0.52 - 1, 3)
-    assert wallet.trade([market(3, 0.7, 0.48, 0.52, liquidity=100.0)], [], {}, "t") == []
-    assert wallet.trade([market(4, 0.999, 0.985, 0.995)], [], {}, "t") == []  # nothing to gain above 99 cents
+    assert wallet.trade([market(3, 0.7, 0.48, 0.52, liquidity=100.0)], [], {}, at(1)) == []
+    assert wallet.trade([market(4, 0.999, 0.985, 0.995)], [], {}, at(1)) == []  # nothing to gain above 99 cents
     empty_book = {**market(1, 0.3, 0.0, 1.0), "price": 0.6}
-    assert wallet.trade([empty_book], trades, {}, "t") == []  # nobody to sell to: the position stays, even though the bot changed its mind
+    assert wallet.trade([empty_book], trades, {}, at(2)) == []  # nobody to sell to: the position stays, even though the bot changed its mind
     assert round(wallet.positions(trades, {}, {"m1": empty_book})[0]["now"], 2) == 0.6  # valued at the last shown price
 
     # The referee replays the log: the real one is clean, and a doctored trade is caught.
@@ -771,13 +783,14 @@ def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_ear
     assert "not bought at the live asking price" in wallet.audit(cheap, {})[0]
     greedy = [{**trades[0], "coins": 500.0, "shares": round(500 / 0.52, 4)}]  # a stake of half the wallet
     assert "more than 2% of its 1000.00 spare coins" in wallet.audit(greedy, {})[0]
-    assert "after the market's result was known" in wallet.audit(trades, {"m1": 1}, {"m1": "t0"})[0]
+    assert "after the market's result was known" in wallet.audit(trades, {"m1": 1}, {"m1": at(0)})[0]
+    assert "sold a position it did not hold" in wallet.audit(later, {})[0]
+    assert "made under rules version 2" in wallet.audit([{**trades[0], "rules": 2}], {})[0]
     # A wallet is paid when its market resolves, so later stakes are judged against the coins it then has.
     paid = wallet.book("Back the bot", trades, {"m1": 1})[0]  # 980 spare plus the payout
-    after = [{**trades[0], "id": "m5", "at": "t5", "coins": round(0.02 * paid, 2), "shares": round(round(0.02 * paid, 2) / 0.52, 4)}]
-    assert wallet.audit(trades[:1] + after, {"m1": 1}, {"m1": "t2"}) == []  # 2% of the larger wallet is within the limit
+    after = [{**trades[0], "id": "m5", "at": at(5), "coins": round(0.02 * paid, 2), "shares": round(round(0.02 * paid, 2) / 0.52, 4)}]
+    assert wallet.audit(trades[:1] + after, {"m1": 1}, {"m1": at(2)}) == []  # 2% of the larger wallet is within the limit
     assert "more than 2%" in wallet.audit(trades[:1] + after, {}, {})[0]  # without the win it would not be
-    assert "sold a position it did not hold" in wallet.audit(later, {})[0]
 
     # Forty closed bets that mostly win earn a rule its say; thirty-nine do not, and neither does a losing run.
     def run(count, wins):
@@ -787,22 +800,22 @@ def test_fake_coin_wallets_trade_at_live_prices_sell_on_a_change_of_view_and_ear
         ]
         return bought, {f"m{n}": int(n % 10 < wins) for n in range(count)}
 
+    assert wallet.standings(*run(40, 8), {})["Back the bot"]["earned"] and not wallet.standings(*run(39, 8), {})["Back the bot"]["earned"]
+    assert not wallet.standings(*run(40, 4), {})["Back the bot"]["earned"]
+
     # The learner wallet buys nothing until a fixed rule has ten closed bets and is ahead; then it copies that rule.
     assert wallet.leader(trades, {}) is None and not [t for t in trades if t["rule"] == wallet.LEARNER]
     assert wallet.leader(*run(10, 8)) == "Back the bot" and wallet.leader(*run(9, 8)) is None and wallet.leader(*run(10, 4)) is None
     won_log, results = run(10, 8)
-    copied = wallet.trade([market(99, 0.7, 0.48, 0.52)], won_log, results, "t9")
+    copied = wallet.trade([market(99, 0.7, 0.48, 0.52)], won_log, results, at(9))
     assert [(t["rule"], t["side"]) for t in copied] == [("Back the bot", "yes"), ("Fade the bot", "no"), (wallet.LEARNER, "yes")]
 
     # The goal is reached only by winning: a wallet at 5,000 opens nothing new, and its course is reported honestly.
     rich = [{"rule": "Back the bot", "id": "big", "action": "buy", "side": "yes", "price": 0.01, "coins": 50.0, "shares": 5000.0, "bid": 0.0, "ask": 0.01}]
-    assert not [t for t in wallet.trade([market(98, 0.7, 0.48, 0.52)], rich, {"big": 1}, "t") if t["rule"] == "Back the bot"]
+    assert not [t for t in wallet.trade([market(98, 0.7, 0.48, 0.52)], rich, {"big": 1}, at(1)) if t["rule"] == "Back the bot"]
     ahead, behind = wallet.standings(*run(10, 8), {})["Back the bot"], wallet.standings(*run(10, 4), {})["Back the bot"]
     assert wallet.course(ahead).startswith("about ") and wallet.course(behind) == "not on course"
     assert wallet.course(wallet.standings(trades, {}, {})["Back the bot"]) == "too early to say"
-
-    assert wallet.standings(*run(40, 8), {})["Back the bot"]["earned"] and not wallet.standings(*run(39, 8), {})["Back the bot"]["earned"]
-    assert not wallet.standings(*run(40, 4), {})["Back the bot"]["earned"]
 
     rows = [{"forecast": 0.7, "crowd": 0.5, "outcome": 1}, {"forecast": 0.7, "crowd": 0.5, "outcome": 0}, {"forecast": 0.7, "crowd": 0.995, "outcome": 1}]
     backed = wallet.backtest(rows)["Back the bot"]

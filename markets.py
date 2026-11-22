@@ -335,9 +335,9 @@ def scorecard(
         lines += [
             "", "## Practice betting with fake coins", "",
             f"Each betting rule started with {wallet.START:,.0f} fake coins and trades by itself, {wallet.STAKE:.0%} of its spare "
-            f"coins a bet. It buys at the live asking price, sells at the live bid, and looks at every position again on each run: "
-            f"it sells when the bot's view or the price has changed, and may switch sides. A share pays 1 coin if its side wins and "
-            f"nothing if it loses. No real money is involved. A rule earns a say after {wallet.EARN_BETS} closed bets if its gain per "
+            f"coins a bet, on markets closing within {wallet.MAX_DAYS} days. It buys at the live asking price, sells at the live bid, "
+            f"and pays each market's real Polymarket fee both ways. It looks at every position again on each run. A share pays 1 coin "
+            f"if its side wins and nothing if it loses. No real money is involved. A rule earns a say after {wallet.EARN_BETS} closed bets if its gain per "
             f"bet is clearly above zero (a margin of {wallet.EARN_T} or more); its new bets are then pointed out to you.",
             "",
             f"**Goal: turn {wallet.START:,.0f} coins into {wallet.GOAL:,.0f} by winning bets, and in no other way.** The rules are fixed, "
@@ -370,7 +370,8 @@ def scorecard(
             lines += [
                 f"- {trade['at'][:16].replace('T', ' ')}: {trade['rule']} {'bought' if trade['action'] == 'buy' else 'sold'} "
                 f"{trade['shares']:.0f} {trade['side'].title()} at {cents(trade['price'])} for {trade['coins']:.0f} coins "
-                f"(bot {trade['forecast']:.0%}, bid {cents(trade['bid'])}, ask {cents(trade['ask'])}). [{trade['question']}]({trade['url']})"
+                f"(bot {trade['forecast']:.0%}, bid {cents(trade['bid'])}, ask {cents(trade['ask'])}, fee {trade.get('fee', 0):.2f}). "
+                f"[{trade['question']}]({trade['url']})"
                 for trade in reversed(trades)
             ]
     lines += ["", "## Still open", ""]

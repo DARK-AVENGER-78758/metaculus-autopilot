@@ -168,6 +168,8 @@ def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:
         names, prices = _listed(market.get("outcomes")), _listed(market.get("outcomePrices"))
         if market.get("closed") or [str(name).lower() for name in names] != ["yes", "no"] or len(prices) != 2:
             continue
+        fees = market.get("feeSchedule") or {}
+        fees = json.loads(fees) if isinstance(fees, str) else fees
         try:
             closes = datetime.fromisoformat((market.get("endDate") or "").replace("Z", "+00:00"))
             closes = (closes if closes.tzinfo else closes.replace(tzinfo=timezone.utc)).isoformat()
@@ -184,6 +186,10 @@ def _market_rows(markets: list[dict], url: str | None = None) -> list[dict]:
             # The live order book: what a Yes share sells for and costs right now, and the dollars resting in it.
             "bid": _or_none(market.get("bestBid")), "ask": _or_none(market.get("bestAsk")),
             "liquidity": _or_none(market.get("liquidityNum", market.get("liquidity"))),
+            # What a trade costs here: Polymarket's taker fee is shares x rate x (price x (1 - price)) ^ exponent.
+            "fee_rate": _or_none(fees.get("rate")) or 0.0 if market.get("feesEnabled") else 0.0,
+            "fee_exponent": _or_none(fees.get("exponent")) or 1.0,
+            "min_shares": _or_none(market.get("orderMinSize")) or 0.0,
         })
     return rows
 
