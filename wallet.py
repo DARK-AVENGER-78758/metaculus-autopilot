@@ -46,6 +46,7 @@ GOAL = 5000.0  # the owner's target for a wallet; one that gets there stops open
 RULES_VERSION = 3
 LEARNER = "Follow the best"  # a fifth wallet that copies whichever fixed rule has done best so far
 LEARN_BETS = 10  # closed bets a rule needs before the learner will follow it
+SELF = "Self-trained"  # a wallet that learns, for each kind of market, which rule has made coins there, and follows it
 
 
 def _lean(edge: float, held: str | None) -> str | None:
@@ -96,7 +97,7 @@ RULES = {
 ONLY = {"Bot on price markets": "price"}  # a wallet that opens bets on one kind of market only
 
 
-WALLETS = [*RULES, LEARNER]
+WALLETS = [*RULES, LEARNER, SELF]
 
 
 def leader(trades: list[dict], outcomes: dict) -> str | None:
@@ -107,6 +108,30 @@ def leader(trades: list[dict], outcomes: dict) -> str | None:
         if len(gains) >= LEARN_BETS and statistics.mean(gains) > best_gain:
             best, best_gain = name, statistics.mean(gains)
     return best
+
+
+def lessons(trades: list[dict], outcomes: dict) -> dict[str, dict]:
+    """What the record teaches so far: for each kind of market, the fixed rule that has made the most a closed bet there.
+
+    `follow` is true only if that rule has LEARN_BETS closed bets on the kind and is ahead.
+    This is recomputed from the whole log on every run, so the self-trained wallet changes
+    its mind as results come in, with nobody choosing for it.
+    """
+    gains: dict[str, dict[str, list[float]]] = {}
+    for name in RULES:
+        for bought, gain in _replay(name, trades, outcomes)[2]:
+            if bought.get("kind"):
+                gains.setdefault(bought["kind"], {}).setdefault(name, []).append(gain)
+    learned = {}
+    for kind, by_rule in gains.items():
+        tried = {name: values for name, values in by_rule.items() if len(values) >= LEARN_BETS}
+        best = max(tried, key=lambda name: statistics.mean(tried[name]), default=None)
+        learned[kind] = {
+            "rule": best, "bets": len(tried[best]) if best else max(map(len, by_rule.values())),
+            "gain": statistics.mean(tried[best]) if best else 0.0,
+            "follow": bool(best) and statistics.mean(tried[best]) > 0,
+        }
+    return learned
 
 
 def quotes(market: dict) -> tuple[float, float]:
@@ -150,12 +175,9 @@ def _margin(gains: list[float]) -> tuple[float, float]:
     return statistics.mean(gains), statistics.mean(gains) / (spread / len(gains) ** 0.5) if spread else 0.0
 
 
-def book(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str, dict], list[float]]:
-    """Replay one rule's trades: its spare coins, its open positions by market, and the gain on each closed bet.
-
-    A position still open when its market resolves is paid out: 1 coin a share if its side won.
-    """
-    coins, held, gains = START, {}, []
+def _replay(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str, dict], list[tuple[dict, float]]]:
+    """One rule's trades replayed: spare coins, open positions by market, and each closed bet with its gain."""
+    coins, held, closed = START, {}, []
     for trade in trades:
         if trade["rule"] != rule:
             continue
@@ -165,13 +187,22 @@ def book(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str
         else:  # a sale always closes the whole position
             bought = held.pop(trade["id"])
             coins += trade["coins"]
-            gains.append(trade["coins"] / bought["coins"] - 1)
+            closed.append((bought, trade["coins"] / bought["coins"] - 1))
     for key in [key for key in held if key in outcomes]:
         bought = held.pop(key)
         paid_out = bought["shares"] * (outcomes[key] if bought["side"] == "yes" else 1 - outcomes[key])
         coins += paid_out
-        gains.append(paid_out / bought["coins"] - 1)
-    return coins, held, gains
+        closed.append((bought, paid_out / bought["coins"] - 1))
+    return coins, held, closed
+
+
+def book(rule: str, trades: list[dict], outcomes: dict) -> tuple[float, dict[str, dict], list[float]]:
+    """Replay one rule's trades: its spare coins, its open positions by market, and the gain on each closed bet.
+
+    A position still open when its market resolves is paid out: 1 coin a share if its side won.
+    """
+    coins, held, closed = _replay(rule, trades, outcomes)
+    return coins, held, [gain for _, gain in closed]
 
 
 def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> list[dict]:
@@ -185,7 +216,8 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
     followed = leader(trades, outcomes)
     keep = lambda forecast, price, held=None: held  # noqa: E731  no rule to follow yet: hold what it has, buy nothing
     live = {market["id"]: market for market in markets}
-    for name, rule in [*RULES.items(), (LEARNER, RULES[followed] if followed else keep)]:
+    learned = {kind: lesson["rule"] for kind, lesson in lessons(trades, outcomes).items() if lesson["follow"]}
+    for name in WALLETS:
         coins, held, _ = book(name, trades, outcomes)
         worth = coins + sum(row["value"] for row in positions(trades, outcomes, live) if row["rule"] == name)
         for market in markets:
@@ -197,14 +229,18 @@ def trade(markets: list[dict], trades: list[dict], outcomes: dict, at: str) -> l
                 continue  # an empty order book: a real trader could neither buy nor sell here now
             mid = (bid + ask) / 2
             side = held[key]["side"] if key in held else None
+            # Whose rule this wallet uses here: its own, the leader's, or the one its record has taught it for this kind.
+            source = {LEARNER: followed, SELF: learned.get(market.get("kind"))}.get(name, name)
+            rule = RULES[source] if source else keep
             want = rule(market["forecast"], mid, side)
-            scope = ONLY.get(followed if name == LEARNER else name)
+            scope = ONLY.get(source)
             if scope and not side and market.get("kind") != scope:
                 want = None  # not this wallet's kind of market
             seen = {
                 "rule": name, "id": key, "question": market["question"], "url": market["url"], "at": at,
                 "forecast": market["forecast"], "bid": bid, "ask": ask, "rules": RULES_VERSION,
                 "fee_rate": market.get("fee_rate") or 0.0, "fee_exponent": market.get("fee_exponent") or 1.0,
+                "kind": market.get("kind"),
             }
             if side and want != side:
                 bought = held.pop(key)

@@ -709,6 +709,7 @@ def test_market_lane_reads_bets_gives_guidance_keeps_score_and_keeps_bets_privat
     card = (private / "scorecard.md").read_text(encoding="utf-8")
     assert "## Practice betting with fake coins" in card and "| Back the bot | 0 | 1 | 1 | +96% |" in card
     assert "**Referee:** 2 practice trades replayed, none broke a rule." in card and "Goal: turn 1,000 coins into 5,000" in card
+    assert "### What the bot has taught itself" in card and "**other markets:** still learning" in card
     assert "### Latest practice trades" in card and "Back the bot bought 39 Yes at 51¢ for 20 coins (bot 70%, bid 49¢, ask 51¢, fee 0.00)" in card
     assert "Markets forecast: 1. Resolved: 1." in card and "| Bot | 100% |" in card and "Could not read the market at https://polymarket.com/market/gone" in card
 
@@ -809,6 +810,29 @@ def test_fake_coin_wallets_trade_at_live_prices_pay_fees_and_earn_a_say_only_by_
     won_log, results = run(10, 8)
     copied = wallet.trade([market(99, 0.7, 0.48, 0.52)], won_log, results, at(9))
     assert [(t["rule"], t["side"]) for t in copied] == [("Back the bot", "yes"), ("Fade the bot", "no"), (wallet.LEARNER, "yes")]
+
+    # Self-training: the wallet learns from closed bets which rule has made coins on each kind of market.
+    def history(rule, kind, wins, start):  # ten closed bets of one rule on one kind, bought at 50 cents
+        bought = [
+            {"rule": rule, "id": f"h{start + n}", "action": "buy", "side": "yes", "price": 0.5, "coins": 10.0, "shares": 20.0, "bid": 0.48, "ask": 0.5, "kind": kind}
+            for n in range(10)
+        ]
+        return bought, {f"h{start + n}": int(n < wins) for n in range(10)}
+
+    log, known = [], {}
+    for rule, kind, wins, start in (("Back the bot", "price", 8, 0), ("Fade the bot", "price", 6, 10), ("Back the bot", "other", 3, 20), ("Fade the bot", "sport", 9, 30)):
+        bought, results = history(rule, kind, wins, start)
+        log, known = log + bought, {**known, **results}
+    log += history("Back the bot", "election", 9, 40)[0][:5]  # five open bets teach nothing yet
+    learned = wallet.lessons(log, known)
+    assert (learned["price"]["rule"], learned["price"]["follow"], learned["price"]["bets"]) == ("Back the bot", True, 10)
+    assert (learned["other"]["rule"], learned["other"]["follow"]) == ("Back the bot", False)  # its best rule there loses
+    assert learned["sport"]["rule"] == "Fade the bot" and "election" not in learned  # nothing closed there yet
+    taught = [t for t in wallet.trade(
+        [market(50, 0.7, 0.48, 0.52, kind="price"), market(51, 0.7, 0.48, 0.52, kind="other"), market(52, 0.7, 0.48, 0.52, kind="sport")],
+        log, known, at(9),
+    ) if t["rule"] == wallet.SELF]
+    assert [(t["id"], t["side"], t["kind"]) for t in taught] == [("m50", "yes", "price"), ("m52", "no", "sport")]  # backs the bot, fades the bot, skips
 
     # The goal is reached only by winning: a wallet at 5,000 opens nothing new, and its course is reported honestly.
     rich = [{"rule": "Back the bot", "id": "big", "action": "buy", "side": "yes", "price": 0.01, "coins": 50.0, "shares": 5000.0, "bid": 0.0, "ask": 0.01}]

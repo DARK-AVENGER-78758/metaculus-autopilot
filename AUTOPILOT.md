@@ -267,6 +267,23 @@ The referee itself was wrong for that week: it forgot to pay a wallet out when i
 market resolved, so it reported hundreds of false alarms. It now settles each market at
 the run that learned the result and checks its replay against the wallet's own books.
 
+**Self-training.** Nothing here retrains the language models; they are hosted and fixed.
+What trains itself, on every run and with nobody choosing, is how the bot bets:
+
+- **"Self-trained" wallet.** From every closed practice bet it works out, for each kind of
+  market (price, election, sport, economy, screen, other), which fixed rule has made the
+  most a bet there. It follows that rule on that kind once the rule has 10 closed bets
+  there and is ahead, and it does not bet on a kind where no rule has made coins. The
+  scorecard's "What the bot has taught itself" section lists what it currently believes.
+- **"Follow the best" wallet.** The same idea across all markets at once.
+- **Earned trust.** The bot's own forecast is acted on for a kind of market only after it
+  has beaten the price there on 40 resolved markets.
+- **The exam.** GitHub's scheduler sits newly resolved questions a few times a day and
+  rescored figures appear on each run's page.
+
+All of it restarted with rules version 3, so it is learning again from the first closed
+bets under real fees.
+
 A rule stakes 2% of its spare coins a bet and holds at most 25 positions. A market with an
 open position is followed until it resolves, so the bot keeps forecasting it and the rule
 can react. Every trade is in `bets.jsonl`; the scorecard shows each wallet, every open
