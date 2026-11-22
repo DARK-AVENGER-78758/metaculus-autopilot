@@ -26,7 +26,7 @@ jobs:
   # GitHub's scheduler started two scheduled runs in a day and a half, so every run starts the
   # next one itself (last step below). This job makes that next run wait: the "pace"
   # environment has a 30-minute wait timer and nothing else, and waiting there uses no runner.
-  # To stop the chain, cancel the waiting run or disable this workflow.
+  # To stop the chain, cancel the run that is waiting or working, or disable this workflow.
   pace:
     if: inputs.paced
     runs-on: ubuntu-latest
@@ -35,7 +35,8 @@ jobs:
       - run: echo "Waited half an hour."
   watch:
     needs: pace
-    if: always() && needs.pace.result != 'failure' && needs.pace.result != 'cancelled'
+    # Not always(): a job that always runs ignores an ordinary cancel, as one run showed.
+    if: ${{ !cancelled() && needs.pace.result != 'failure' }}
     concurrency: # one watch at a time; a run waiting in "pace" does not hold this
       group: market-watch
       cancel-in-progress: false
@@ -117,8 +118,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch_markets.yaml/enable"
       # Only when no other run of this workflow is waiting or running, so there is one chain.
+      # Cancelling a run stops the chain: a cancelled run starts no successor.
       - name: Start the next run
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
