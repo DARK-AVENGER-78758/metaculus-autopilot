@@ -752,6 +752,13 @@ def test_each_day_is_assessed_once_and_too_few_bets_widen_the_watch():
         (private / "daily.jsonl").write_text(json.dumps(earlier) + "\n", encoding="utf-8")
         row, text = markets.assess(NOW, ledger, busy, wallet.standings(busy, {}, {}), {}, [])
         assert row["bets"] == 12 and row["near"] == 6 and "Met." in text  # enough bets: the watch stays as it is
+        # A coin or two up on open bets is not called a profit; a clear gain on ten closed bets is.
+        up = wallet.standings(busy, {}, {})
+        up["Back the bot"]["coins"] = 1004.0
+        text = markets.assess(NOW, ledger, busy, up, {}, [])[1]
+        assert "**Profit: none yet.** 1 of" in text and "Back the bot 1,004" in text and "too little to call a profit" in text
+        up["Back the bot"].update(coins=1100.0, closed=10)
+        assert "**Profit: 1 of" in markets.assess(NOW, ledger, busy, up, {}, [])[1]
 
 
 def test_fake_coin_wallets_trade_at_live_prices_pay_fees_and_earn_a_say_only_by_results():

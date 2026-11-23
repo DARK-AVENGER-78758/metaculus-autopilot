@@ -378,6 +378,9 @@ def assess(now: datetime, ledger: list[dict], trades: list[dict], wallets: dict,
     settled_that_day = {row["id"] for row in ledger if "outcome" in row and (row.get("run") or row["settled_at"])[:10] == day}
     graded = [row for row in _graded(ledger) if row["id"] in settled_that_day]
     ahead = sorted((name for name in wallets if coins[name] > wallet.START), key=lambda name: -coins[name])
+    # A profit worth the name: up by more than 1%, on enough closed bets to mean something. A coin or two up on
+    # open bets is only how their prices happen to stand today.
+    solid = [name for name in ahead if coins[name] > 1.01 * wallet.START and wallets[name]["closed"] >= wallet.LEARN_BETS]
     best = max(coins, key=coins.get)
     lines = [
         f"# Daily assessment: {day}", "",
@@ -387,8 +390,12 @@ def assess(now: datetime, ledger: list[dict], trades: list[dict], wallets: dict,
         + (f" (on average {sum(gain for _, gain in closed) / len(closed):+.0%} a bet)." if closed else "."),
         "**Profit: "
         + (
-            f"{len(ahead)} of {len(wallets)} wallets are above their {wallet.START:,.0f} starting coins:** "
-            + ", ".join(f"{name} {coins[name]:,.0f}" for name in ahead) + "."
+            f"{len(solid)} of {len(wallets)} wallets are in profit:** " + ", ".join(f"{name} {coins[name]:,.0f}" for name in solid)
+            + f". (In profit means more than 1% above {wallet.START:,.0f} coins, on at least {wallet.LEARN_BETS} closed bets.)"
+            if solid
+            else f"none yet.** {len(ahead)} of {len(wallets)} wallets stand a little above {wallet.START:,.0f} coins ("
+            + ", ".join(f"{name} {coins[name]:,.0f}" for name in ahead)
+            + f"), but by under 1% or on fewer than {wallet.LEARN_BETS} closed bets, which is too little to call a profit."
             if ahead
             else f"no wallet is above its {wallet.START:,.0f} starting coins.** The closest is {best} at {coins[best]:,.0f}."
         ),
