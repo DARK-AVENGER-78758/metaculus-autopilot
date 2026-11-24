@@ -179,3 +179,7 @@ temp/
 
 # The market lane's private folder: the owner's bets, the ledger and alerts
 private/
+
+# The generated dashboard site (published to the gh-pages branch, not committed to main)
+site/
+runs.json
