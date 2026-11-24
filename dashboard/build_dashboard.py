@@ -60,6 +60,67 @@ def main() -> None:
     graded = grab(r"record on the (\d+) watched markets", scorecard, "0")
     referee = grab(r"(\*\*Referee:\*\*[^\n]*)", scorecard, "")
 
+    # Join each trade to its market's close time and outcome, so we can show when it was placed
+    # (while the market was live, or not) and how it resolved.
+    first_forecast: dict = {}
+    for row in ledger:
+        if "forecast" in row:
+            first_forecast.setdefault(row["id"], row)
+    closes_of = {key: row.get("closes") for key, row in first_forecast.items()}
+
+    def when(ts):
+        try:
+            return datetime.fromisoformat(str(ts))
+        except (TypeError, ValueError):
+            return None
+
+    def lead_hours(at, closes):
+        a, c = when(at), when(closes)
+        return (c - a).total_seconds() / 3600 if a and c else None
+
+    buys = [t for t in trades if t.get("action") == "buy"]
+    rated = [(t, lead_hours(t.get("at"), closes_of.get(t["id"]))) for t in buys]
+    with_lead = [lh for _, lh in rated if lh is not None]
+    trade_stats = {
+        "trades": len(trades),
+        "buys": len(buys),
+        "sells": sum(t.get("action") == "sell" for t in trades),
+        "buys_with_close": len(with_lead),
+        "buys_while_live": sum(lh > 0 for lh in with_lead),
+        "buys_after_close": sum(lh <= 0 for lh in with_lead),
+        "avg_lead_hours": round(sum(lh for lh in with_lead if lh > 0) / max(1, sum(lh > 0 for lh in with_lead)), 1) if with_lead else None,
+        "staked": round(sum(t.get("coins", 0) for t in buys), 1),
+        "fees": round(sum(t.get("fee", 0) for t in trades), 2),
+        "resolved": sum(t["id"] in outcomes for t in buys),
+        "open_or_live": sum(t["id"] not in outcomes for t in buys),
+    }
+
+    def describe_trade(t):
+        key, out = t["id"], outcomes.get(t["id"])
+        lh = lead_hours(t.get("at"), closes_of.get(key))
+        shares = t.get("shares", 0)
+        row = {
+            "at": t.get("at"), "rule": t.get("rule"), "action": t.get("action"),
+            "side": t.get("side"), "price": t.get("price"), "coins": round(t.get("coins", 0), 1),
+            "fee": round(t.get("fee", 0), 2), "forecast": t.get("forecast"), "kind": t.get("kind"),
+            "question": t.get("question"), "url": t.get("url"),
+            "lead_hours": round(lh, 1) if lh is not None else None,
+            "live": (lh > 0) if lh is not None else None,
+            "closes": closes_of.get(key),
+        }
+        if t.get("action") == "sell":
+            row["result"] = "sold early"
+        elif out is None:
+            row["result"] = "open"
+        else:
+            payout = shares * (out if t.get("side") == "yes" else 1 - out)
+            row["result"] = "won" if payout > t.get("coins", 0) else "lost"
+            row["payout"] = round(payout, 1)
+            row["outcome"] = out
+        return row
+
+    recent_trades = [describe_trade(t) for t in trades[-150:]][::-1]  # newest first
+
     runs = []
     runs_file = SITE / "runs.json"
     if runs_file.exists():
@@ -98,6 +159,8 @@ def main() -> None:
             {"date": d["date"], "bets": d.get("bets", 0), "closed": d.get("closed", 0), "start": d.get("start", False)}
             for d in daily
         ],
+        "trade_stats": trade_stats,
+        "trades": recent_trades,
         "runs": runs,
     }
 
