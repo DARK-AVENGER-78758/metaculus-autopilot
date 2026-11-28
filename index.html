@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Market bot dashboard</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --card:#171a21; --line:#272b34; --txt:#e6e8ec; --dim:#9aa3b2;
+          --good:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:18px 16px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; }
+  .sub { color:var(--dim); font-size:13px; margin-top:4px; }
+  nav { display:flex; gap:4px; padding:10px 12px 0; flex-wrap:wrap; border-bottom:1px solid var(--line); }
+  nav button { background:none; border:none; color:var(--dim); padding:9px 14px; font-size:14px; cursor:pointer;
+               border-bottom:2px solid transparent; }
+  nav button.on { color:var(--txt); border-bottom-color:var(--accent); }
+  main { padding:16px; max-width:900px; margin:0 auto; }
+  section { display:none; }
+  section.on { display:block; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:0 0 14px; }
+  .big { font-size:15px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; flex:1 1 150px; }
+  .stat .n { font-size:22px; font-weight:600; }
+  .stat .l { color:var(--dim); font-size:12px; margin-top:2px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { text-align:right; padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:500; }
+  .good { color:var(--good); } .bad { color:var(--bad); } .warn { color:var(--warn); } .dim { color:var(--dim); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  pre { white-space:pre-wrap; word-wrap:break-word; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;
+        background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; overflow-x:auto; }
+  a { color:var(--accent); }
+  .note { color:var(--dim); font-size:12px; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Market bot dashboard</h1>
+  <div class="sub" id="status">Loading…</div>
+</header>
+<nav>
+  <button data-tab="overview" class="on">Overview</button>
+  <button data-tab="wallets">Wallets</button>
+  <button data-tab="daily">Daily</button>
+  <button data-tab="trades">Trades</button>
+  <button data-tab="scorecard">Scorecard</button>
+  <button data-tab="context">Context</button>
+</nav>
+<main>
+  <section id="overview" class="on">
+    <div class="row" id="stats"></div>
+    <div class="card"><div id="chain" class="big">Checking the chain…</div><div class="note" id="runsnote"></div></div>
+    <div class="card"><strong>Profit</strong><div id="profit" style="margin-top:6px"></div>
+      <div class="note">“In profit” means a wallet is more than 1% above its 1,000 starting coins on at least 10 closed bets. About 40 closed bets are needed before a result means more than luck. No real money is involved.</div></div>
+    <div class="card"><strong>What the bot has taught itself</strong><ul id="lessons" style="margin:8px 0 0"></ul></div>
+  </section>
+
+  <section id="wallets">
+    <div class="card" style="padding:0; overflow-x:auto"><table id="walletTable"></table></div>
+    <div class="note">Each wallet started with 1,000 fake coins and stakes 2% a bet. “Coins now” values open bets at what they cost. Sorted by coins.</div>
+  </section>
+
+  <section id="daily">
+    <div class="card" style="padding:0; overflow-x:auto"><table id="dailyTable"></table></div>
+    <div class="note">One row per day (UTC). The target is at least 10 bets a day. Full daily write-ups are filed as issues in the private market-alerts repository.</div>
+  </section>
+
+  <section id="trades">
+    <div class="row" id="tradeStats"></div>
+    <div class="card" style="padding:0; overflow-x:auto"><table id="tradeTable"></table></div>
+    <div class="note">The bot's practice trades, newest first (last 150). “Before close” is how long before the market's scheduled close the bet was placed — a positive value means it was placed while the market was still live. Every link goes to the real Polymarket market. No real money is involved.</div>
+  </section>
+
+  <section id="scorecard">
+    <pre id="scorecardText">Loading…</pre>
+  </section>
+
+  <section id="context">
+    <pre id="contextText">Loading…</pre>
+  </section>
+</main>
+
+<script>
+const REPO = "DARK-AVENGER-78758/metaculus-autopilot";
+const $ = (id) => document.getElementById(id);
+const pct = (x) => (x == null ? "—" : Math.round(x * 100) + "%");
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === b.dataset.tab));
+});
+
+function ago(iso) {
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 90) return "just now";
+  if (s < 5400) return Math.round(s / 60) + " min ago";
+  if (s < 129600) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+
+async function loadData() {
+  let d;
+  try { d = await (await fetch("data.json?t=" + Date.now())).json(); }
+  catch (e) { $("status").textContent = "Could not load data.json yet."; return; }
+
+  $("status").innerHTML = `Updated ${ago(d.updated_at)} · ${d.graded} markets resolved · bot right ${d.bot_accuracy ?? "—"}%, market price right ${d.price_accuracy ?? "—"}%`;
+
+  const anyProfit = d.wallets.filter(w => w.in_profit);
+  $("stats").innerHTML = [
+    ["Bets today", `${d.bets_today}`, `target ${d.target}+ ` + (d.bets_today >= d.target ? "✓" : "")],
+    ["Wallets in profit", `${anyProfit.length}/${d.wallets.length}`, "needs 40+ closed bets to trust"],
+    ["Best wallet", d.wallets[0] ? Math.round(d.wallets[0].coins).toLocaleString() : "—", d.wallets[0] ? d.wallets[0].name : ""],
+    ["Goal", d.goal.toLocaleString(), "from " + d.start.toLocaleString() + " fake coins"],
+  ].map(([n, v, l]) => `<div class="stat"><div class="n">${v}</div><div class="l"><b>${n}</b> · ${l}</div></div>`).join("");
+
+  $("profit").innerHTML = anyProfit.length
+    ? anyProfit.map(w => `<span class="pill good">${w.name}: ${Math.round(w.coins).toLocaleString()} (${w.closed} closed)</span>`).join(" ")
+    : `<span class="dim">No wallet is in profit yet.</span>`;
+
+  $("lessons").innerHTML = (d.lessons.length ? d.lessons : ["Nothing yet."]).map(l => `<li>${l}</li>`).join("");
+
+  $("walletTable").innerHTML =
+    "<tr><th>Wallet</th><th>Coins</th><th>Open</th><th>Closed</th><th>Won</th><th>Gain/bet</th><th>Course to goal</th><th>In profit</th></tr>" +
+    d.wallets.map(w => {
+      const g = w.per_bet > 0 ? "good" : w.per_bet < 0 ? "bad" : "dim";
+      const c = w.coins > 1010 ? "good" : w.coins < 990 ? "bad" : "";
+      return `<tr><td>${w.name}</td><td class="${c}">${Math.round(w.coins).toLocaleString()}</td><td>${w.open}</td><td>${w.closed}</td><td>${w.won}</td>`
+        + `<td class="${g}">${w.per_bet >= 0 ? "+" : ""}${Math.round(w.per_bet * 100)}%</td><td class="dim">${w.course}</td>`
+        + `<td>${w.in_profit ? '<span class="good">yes</span>' : '<span class="dim">no</span>'}</td></tr>`;
+    }).join("");
+
+  $("dailyTable").innerHTML =
+    "<tr><th>Date (UTC)</th><th>Bets</th><th>Closed</th><th>≥10?</th></tr>" +
+    d.daily.filter(x => !x.start).slice().reverse().map(x =>
+      `<tr><td>${x.date}</td><td>${x.bets}</td><td>${x.closed}</td><td>${x.bets >= 10 ? '<span class="good">✓</span>' : '<span class="bad">✗</span>'}</td></tr>`
+    ).join("") || "<tr><td class='dim'>No full day assessed yet.</td></tr>";
+
+  renderTrades(d);
+  renderChain(d.runs);
+}
+
+function esc(s) { return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function renderTrades(d) {
+  const ts = d.trade_stats || {};
+  const afterClose = ts.buys_after_close || 0;
+  $("tradeStats").innerHTML = [
+    ["Bets placed", ts.buys ?? "—", `${ts.sells ?? 0} sells too`],
+    ["Placed while live", `${ts.buys_while_live ?? 0}/${ts.buys_with_close ?? 0}`, afterClose ? `<span class="bad">${afterClose} after close!</span>` : "none after close"],
+    ["Avg lead before close", ts.avg_lead_hours != null ? ts.avg_lead_hours + " h" : "—", "when placed"],
+    ["Fees paid", (ts.fees ?? 0).toLocaleString(), (ts.staked ?? 0).toLocaleString() + " staked"],
+  ].map(([n, v, l]) => `<div class="stat"><div class="n">${v}</div><div class="l"><b>${n}</b> · ${l}</div></div>`).join("");
+
+  const trades = d.trades || [];
+  if (!trades.length) { $("tradeTable").innerHTML = "<tr><td class='dim' style='padding:14px'>No trades yet.</td></tr>"; return; }
+  $("tradeTable").innerHTML =
+    "<tr><th>Time (UTC)</th><th>Wallet</th><th>Action</th><th>Price</th><th>Stake</th><th>Fee</th><th>Bot</th><th>Before close</th><th>Result</th><th>Market</th></tr>" +
+    trades.map(t => {
+      const act = t.action === "sell" ? `sell ${t.side}` : `buy ${t.side}`;
+      const bc = t.lead_hours == null ? '<span class="dim">—</span>'
+        : t.live ? `<span class="good">${t.lead_hours} h</span>`
+        : `<span class="bad">after close</span>`;
+      const res = t.result === "won" ? `<span class="good">won +${Math.round((t.payout || 0) - t.coins)}</span>`
+        : t.result === "lost" ? `<span class="bad">lost ${t.coins}</span>`
+        : t.result === "sold early" ? '<span class="dim">sold</span>'
+        : '<span class="warn">open</span>';
+      const q = esc(t.question || "").slice(0, 70);
+      const link = t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener">${q}</a>` : q;
+      return `<tr><td>${(t.at || "").slice(0, 16).replace("T", " ")}</td><td>${esc(t.rule)}</td><td>${act}</td>`
+        + `<td>${Math.round((t.price || 0) * 100)}¢</td><td>${t.coins}</td><td>${(t.fee || 0).toFixed(2)}</td>`
+        + `<td class="dim">${t.forecast != null ? Math.round(t.forecast * 100) + "%" : "—"}</td>`
+        + `<td>${bc}</td><td>${res}</td><td style="text-align:left; white-space:normal; max-width:320px">${link}</td></tr>`;
+    }).join("");
+}
+
+function renderChain(fallback) {
+  fetch(`https://api.github.com/repos/${REPO}/actions/workflows/watch_markets.yaml/runs?per_page=12`)
+    .then(r => r.ok ? r.json() : Promise.reject()).then(j => showChain(j.workflow_runs))
+    .catch(() => showChain(fallback || []));
+}
+function showChain(runs) {
+  if (!runs || !runs.length) { $("chain").textContent = "No recent runs found."; return; }
+  const norm = runs.map(r => ({ status: r.status, conclusion: r.conclusion, at: r.created_at || r.createdAt }));
+  const live = norm.find(r => r.status !== "completed");
+  const last = norm.find(r => r.status === "completed");
+  const day = norm.filter(r => (Date.now() - new Date(r.at)) < 864e5);
+  const fails = day.filter(r => r.conclusion === "failure").length;
+  let html;
+  if (live) html = `<span class="good">● Chain running</span> — a run is ${live.status.replace("_", " ")} now.`;
+  else if (last && last.conclusion === "success") html = `<span class="good">● Chain healthy</span> — last run succeeded ${ago(last.at)}.`;
+  else html = `<span class="warn">● Idle</span> — last run ${ago(last ? last.at : norm[0].at)}.`;
+  $("chain").innerHTML = html;
+  $("runsnote").innerHTML = `${day.length} runs in the last 24 h` + (fails ? ` · <span class="bad">${fails} failed</span>` : " · none failed")
+    + ` · <a href="https://github.com/${REPO}/actions/workflows/watch_markets.yaml" target="_blank" rel="noopener">GitHub Actions ↗</a>`;
+}
+
+fetch("context.md?t=" + Date.now()).then(r => r.text()).then(t => $("contextText").textContent = t).catch(() => {});
+fetch("https://raw.githubusercontent.com/" + REPO + "/gh-pages/scorecard.md?t=" + Date.now())
+  .then(r => r.ok ? r.text() : Promise.reject()).then(t => $("scorecardText").textContent = t)
+  .catch(() => $("scorecardText").textContent = "Scorecard not published to this page.");
+
+loadData();
+setInterval(loadData, 60000);
+</script>
+</body>
+</html>
